@@ -2,9 +2,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import secrets
 from fastapi.responses import JSONResponse
 from .manager import VoiceManager
+from fastapi import UploadFile, File
+from .stt.mock_stt import MockSTT
 
 router = APIRouter()
 manager = VoiceManager()
+_stt = MockSTT()
 
 
 @router.get("/api/voice/status")
@@ -63,4 +66,73 @@ async def ws_voice_session(websocket: WebSocket, conversation_id: str):
         manager.end_session(session.id)
     except Exception as exc:
         await websocket.send_json({"event": "error", "data": {"message": str(exc)}})
+
+
+
+@router.post("/api/stt/upload")
+async def stt_upload(file: UploadFile = File(...)):
+    try:
+        data = await file.read()
+        text = _stt.transcribe(data)
+        return JSONResponse({"text": text})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    except WebSocketDisconnect:
+        manager.end_session(session.id)
+    except Exception as exc:
+        await websocket.send_json({"event": "error", "data": {"message": str(exc)}})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

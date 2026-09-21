@@ -181,7 +181,6 @@ export default function App() {
     input = useRef(null),
     recorder = useRef(null);
   const active = chats.find((chat) => chat.id === activeId) || chats[0];
-  const [draft, setDraft] = useState("");
   const [voiceFinalPending, setVoiceFinalPending] = useState(false);
   const voice = useVoiceSession(active?.id, (finalText) => {
     // insert final transcription into draft
