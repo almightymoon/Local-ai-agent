@@ -16,6 +16,11 @@ try:
 except Exception as e:
     _log(f"stt provider load failed: {e}")
     _stt = get_stt_provider("mock")
+else:
+    try:
+        _log(f"stt provider: {type(_stt).__name__} loaded (name={STT_NAME})")
+    except Exception:
+        pass
 
 
 def _log(msg: str):
@@ -66,6 +71,19 @@ async def ws_voice_session(websocket: WebSocket, conversation_id: str):
                     manager.stop_listening(session.id)
                     _log(f"ws:{session.id} voice.stop")
                     await websocket.send_json({"event": "voice.state", "data": {"state": session.state}})
+                    # try to get buffered audio and run transcription in background
+                    try:
+                        audio = manager.collect_session_audio(session.id)
+                        if audio:
+                            def _on_transcribed(sid, text):
+                                try:
+                                    websocket.send_json({"event": "stt.final", "data": {"text": text}})
+                                except Exception:
+                                    pass
+
+                            manager.submit_audio_for_transcription(session.id, _stt.transcribe, audio, callback=_on_transcribed)
+                    except Exception as e:
+                        _log(f"stt background submit failed: {e}")
                 elif event == "stt.final":
                     # forward final transcription to orchestrator by calling chat() directly
                     text = payload.get("text", "")

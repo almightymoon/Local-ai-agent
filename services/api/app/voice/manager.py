@@ -67,3 +67,29 @@ class VoiceManager:
         # In a real implementation we'd feed to VAD/STT. For now just update state.
         s.state = "listening"
 
+    def collect_session_audio(self, sid: str) -> bytes:
+        """Return concatenated audio bytes for a session if buffered.
+
+        Note: currently manager does not buffer; this method is a placeholder
+        used by the router to request audio for final transcription if present.
+        """
+        # future: return buffered bytes
+        return b""
+
+    def submit_audio_for_transcription(self, sid: str, stt_callable, audio_bytes: bytes, callback=None):
+        """Run transcription in background thread and call callback with result."""
+
+        def _worker():
+            try:
+                text = stt_callable(audio_bytes)
+            except Exception as e:
+                text = None
+            if callback:
+                try:
+                    callback(sid, text)
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
