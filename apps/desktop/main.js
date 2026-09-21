@@ -47,7 +47,8 @@ function createWindow() {
   try {
     fs.appendFileSync("/tmp/electron-main.log", `createWindow called\n`);
   } catch {}
-  mainWindow.webContents.openDevTools({ mode: "right" });
+  // Do not open devtools by default in production desktop app
+  // mainWindow.webContents.openDevTools({ mode: "right" });
   mainWindow.webContents.on("did-finish-load", () => {
     try {
       const fs = require("fs");

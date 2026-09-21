@@ -34,6 +34,9 @@ app.add_middleware(
     allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"],
 )
 
+# expose the session token on app.state so other modules (websockets) can read it
+app.state.SESSION_TOKEN = SESSION_TOKEN
+
 
 @app.middleware("http")
 async def local_access(request: Request, call_next):
@@ -49,9 +52,9 @@ async def local_access(request: Request, call_next):
         "/",
         "/api/session",
     }:
-        if not secrets.compare_digest(
-            request.headers.get("x-agent-token", ""), SESSION_TOKEN
-        ):
+        # Allow token via header or query param (useful for WebSocket upgrades)
+        provided = request.headers.get("x-agent-token", "") or request.query_params.get("token", "")
+        if not secrets.compare_digest(provided, SESSION_TOKEN):
             return JSONResponse(
                 {"detail": "Local session token required."}, status_code=401
             )

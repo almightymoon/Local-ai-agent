@@ -2,6 +2,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, tool, stream, request } from "./api";
 import { Icon } from "./icons";
 import "./styles.css";
+import useVoiceSession from "./voice/useVoiceSession";
+import VoiceButton from "./voice/VoiceButton";
+import VoicePanel from "./voice/VoicePanel";
 
 const starters = [
   {
@@ -172,12 +175,14 @@ export default function App() {
   const [tools, setTools] = useState([]);
   const [actions, setActions] = useState([]);
   const [recording, setRecording] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [pendingDeletes, setPendingDeletes] = useState([]);
   const controller = useRef(null),
     end = useRef(null),
     input = useRef(null),
     recorder = useRef(null);
   const active = chats.find((chat) => chat.id === activeId) || chats[0];
+  const voice = useVoiceSession(active?.id);
   const pending = active.messages.findLast(
     (m) => m.action && !m.decided && m.action.expires * 1000 > Date.now(),
   );
@@ -889,13 +894,17 @@ export default function App() {
                   ref={input}
                   aria-label="Message Zentra"
                   placeholder={
-                    pending
-                      ? "Review the proposed action above to continue…"
-                      : mode === "agent"
-                        ? "Describe what to build. Zentra will inspect, implement, and verify…"
-                        : mode === "plan"
-                          ? "What would you like to plan?"
-                          : "Ask a question…"
+                    voiceOpen
+                      ? voice.partials && voice.partials.length > 0
+                        ? voice.partials.join(" ")
+                        : "Listening…"
+                      : pending
+                        ? "Review the proposed action above to continue…"
+                        : mode === "agent"
+                          ? "Describe what to build. Zentra will inspect, implement, and verify…"
+                          : mode === "plan"
+                            ? "What would you like to plan?"
+                            : "Ask a question…"
                   }
                   rows={2}
                   value={draft}
@@ -949,17 +958,21 @@ export default function App() {
                     Browse workspace
                   </button>
                   <div className="row">
-                    <button
-                      type="button"
-                      className={`icon-button ${recording ? "recording" : ""}`}
-                      aria-label={
-                        recording ? "Stop recording" : "Dictate a message"
-                      }
-                      disabled={busy}
-                      onClick={mic}
-                    >
-                      <Icon name="mic" size={19} />
-                    </button>
+                    <VoiceButton
+                      recording={voiceOpen}
+                      onClick={() => {
+                        // toggle voice recording
+                        if (voiceOpen) {
+                          voice.stop();
+                          setVoiceOpen(false);
+                        } else {
+                          // stop any playing TTS or audio from the app before starting
+                          if (voice && voice.stopPlayback) voice.stopPlayback();
+                          voice.start();
+                          setVoiceOpen(true);
+                        }
+                      }}
+                    />
                     {busy ? (
                       <button
                         type="button"
@@ -987,6 +1000,14 @@ export default function App() {
                 Local by default. Changes only with your approval.
                 <span>Enter to send · Shift + Enter for a new line</span>
               </p>
+              {voiceOpen && (
+                <div className="voice-container">
+                  <VoicePanel
+                    state={voice.state}
+                    partials={voice.partials}
+                  />
+                </div>
+              )}
             </div>
           </div>
         ) : (

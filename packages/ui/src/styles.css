@@ -532,6 +532,26 @@ kbd {
   padding: 20px 30px 23px;
   margin: 0 auto;
 }
+/* Voice panel anchored near composer */
+.composer-voice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  padding: 10px 12px;
+  border-radius: 12px;
+  margin-top: 12px;
+  background: linear-gradient(90deg, rgba(0,0,0,0.03), transparent);
+}
+.composer-voice .voice-orb .orb {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #6aa178);
+}
+.voice-actions {
+  margin-left: auto;
+}
 .composer {
   background: var(--panel);
   border: 1px solid #77777738;
