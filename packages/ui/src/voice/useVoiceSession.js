@@ -12,21 +12,24 @@ export default function useVoiceSession(conversationId, onFinal) {
   useEffect(() => {
     if (!conversationId) return;
     const init = async () => {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const host = window.location.host;
+      // determine base API URL (prefer env var used by Vite/Electron)
+      const API_BASE =
+        (import.meta.env && import.meta.env.VITE_AGENT_API_URL) ||
+        "http://127.0.0.1:8000";
+      const WS_BASE = API_BASE.replace(/^http/, "ws");
       // include session token as query param for WebSocket authentication
       let token = "";
       try {
-        const tokenResp = await fetch(`/api/session`);
+        const tokenResp = await fetch(`${API_BASE}/api/session`);
         token = await tokenResp.json().then((r) => r.token).catch(() => "");
       } catch (e) {
         token = "";
       }
-      const url = `${protocol}//${host}/api/voice/session/${conversationId}?token=${encodeURIComponent(
+      const url = `${WS_BASE}/api/voice/session/${conversationId}?token=${encodeURIComponent(
         token,
       )}`;
       const ws = new WebSocket(url);
-    wsRef.current = ws;
+      wsRef.current = ws;
     ws.onopen = () => {};
     ws.onmessage = async (e) => {
       try {
@@ -129,38 +132,10 @@ export default function useVoiceSession(conversationId, onFinal) {
       const recorder = new MediaRecorder(stream);
       recorderRef.current = recorder;
       const chunks = [];
-      recorder.ondataavailable = async (ev) => {
-        if (ev.data && ev.data.size) {
-          // send binary chunk via websocket
-          try {
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              const arrayBuffer = await ev.data.arrayBuffer();
-              wsRef.current.send(arrayBuffer);
-            }
-          } catch (e) {
-            console.warn("ws send failed", e);
-          }
-          // also upload to STT endpoint for partial transcription (server may return 501)
-          try {
-            const fd = new FormData();
-            fd.append("file", ev.data, "chunk.webm");
-            const result = await fetch(`${window.location.origin.replace(/^http/, 'http')}/api/stt/upload`, {
-              method: "POST",
-              body: fd,
-              headers: { "X-Agent-Token": await (await fetch("/api/session")).json().then(r=>r.token) },
-            }).then((r) => r.json());
-            if (result && result.text) setPartials(result.text);
-            else {
-              // fallback: show a hint when server can't transcribe
-              // keep partials unchanged
-            }
-          } catch (err) {
-            // ignore partial failures
-          }
-          chunks.push(ev.data);
-        }
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size) chunks.push(ev.data);
       };
-      recorder.start(3000); // request dataavailable every 3s
+      recorder.start();
       setState("listening");
     } catch (err) {
       console.error("microphone error", err);
@@ -181,14 +156,31 @@ export default function useVoiceSession(conversationId, onFinal) {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     mediaStreamRef.current = null;
     recorderRef.current = null;
-    // final upload of last captured data by creating a new small recording
+    // upload the full recorded blob for final transcription
     try {
-      // create a short silence file to trigger final transcription if needed
-      // Instead, ask server to transcribe accumulated audio by reading partials as final
-      const finalText = partials || "";
-      sendEvent("stt.final", { text: finalText });
+      const blob = new Blob(chunks, { type: "audio/webm" });
+      const fd = new FormData();
+      fd.append("file", blob, "recording.webm");
+      const API_BASE =
+        (import.meta.env && import.meta.env.VITE_AGENT_API_URL) ||
+        "http://127.0.0.1:8000";
+      const token = await fetch(`${API_BASE}/api/session`).then((r) => r.json()).then((j) => j.token).catch(() => "");
+      const resp = await fetch(`${API_BASE}/api/stt/upload`, {
+        method: "POST",
+        body: fd,
+        headers: { "X-Agent-Token": token },
+      });
+      const result = await resp.json();
+      if (result && result.text) {
+        // send final transcription over websocket so server can forward to orchestrator
+        sendEvent("stt.final", { text: result.text });
+        if (onFinal) onFinal(result.text);
+      } else {
+        // surface error to console
+        console.warn("STT upload returned no text", result);
+      }
     } catch (err) {
-      console.error(err);
+      console.error("final STT upload failed", err);
     }
     setState("idle");
   }

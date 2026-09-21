@@ -136,3 +136,28 @@ async def stt_upload(file: UploadFile = File(...)):
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
