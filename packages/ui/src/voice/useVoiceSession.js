@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 
-export default function useVoiceSession(conversationId) {
+export default function useVoiceSession(conversationId, onFinal) {
   const wsRef = useRef(null);
   const [state, setState] = useState("idle");
   const [session, setSession] = useState(null);
@@ -43,7 +43,14 @@ export default function useVoiceSession(conversationId) {
           setPartials(msg.data.text || "");
         }
         if (msg.event === "stt.final") {
+          // final transcription arrived
+          const finalText = msg.data?.text || "";
           setPartials("");
+          try {
+            if (onFinal && finalText) onFinal(finalText);
+          } catch (e) {
+            console.warn("onFinal callback failed", e);
+          }
           // may contain assistant_response from server; play it via TTS if present
           const resp = msg.data?.assistant_response;
           if (resp && resp.response) {

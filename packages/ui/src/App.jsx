@@ -181,7 +181,13 @@ export default function App() {
     input = useRef(null),
     recorder = useRef(null);
   const active = chats.find((chat) => chat.id === activeId) || chats[0];
-  const voice = useVoiceSession(active?.id);
+  const [draft, setDraft] = useState("");
+  const [voiceFinalPending, setVoiceFinalPending] = useState(false);
+  const voice = useVoiceSession(active?.id, (finalText) => {
+    // insert final transcription into draft
+    setDraft((d) => (d ? d + " " + finalText : finalText));
+    setVoiceFinalPending(false);
+  });
   const pending = active.messages.findLast(
     (m) => m.action && !m.decided && m.action.expires * 1000 > Date.now(),
   );
@@ -893,13 +899,17 @@ export default function App() {
                   ref={input}
                   aria-label="Message Zentra"
                   placeholder={
-                    pending
-                      ? "Review the proposed action above to continue…"
-                      : mode === "agent"
-                        ? "Describe what to build. Zentra will inspect, implement, and verify…"
-                        : mode === "plan"
-                          ? "What would you like to plan?"
-                          : "Ask a question…"
+                    voiceOpen
+                      ? voice.partials && voice.partials.length > 0
+                        ? voice.partials
+                        : "Listening…"
+                      : pending
+                        ? "Review the proposed action above to continue…"
+                        : mode === "agent"
+                          ? "Describe what to build. Zentra will inspect, implement, and verify…"
+                          : mode === "plan"
+                            ? "What would you like to plan?"
+                            : "Ask a question…"
                   }
                   rows={2}
                   value={draft}
@@ -965,6 +975,7 @@ export default function App() {
                           if (voice && voice.stopPlayback) voice.stopPlayback();
                           voice.start();
                           setVoiceOpen(true);
+                          setVoiceFinalPending(true);
                         }
                       }}
                     />
