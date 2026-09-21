@@ -4,7 +4,6 @@ import { Icon } from "./icons";
 import "./styles.css";
 import useVoiceSession from "./voice/useVoiceSession";
 import VoiceButton from "./voice/VoiceButton";
-import VoicePanel from "./voice/VoicePanel";
 
 const starters = [
   {
@@ -894,17 +893,13 @@ export default function App() {
                   ref={input}
                   aria-label="Message Zentra"
                   placeholder={
-                    voiceOpen
-                      ? voice.partials && voice.partials.length > 0
-                        ? voice.partials.join(" ")
-                        : "Listening…"
-                      : pending
-                        ? "Review the proposed action above to continue…"
-                        : mode === "agent"
-                          ? "Describe what to build. Zentra will inspect, implement, and verify…"
-                          : mode === "plan"
-                            ? "What would you like to plan?"
-                            : "Ask a question…"
+                    pending
+                      ? "Review the proposed action above to continue…"
+                      : mode === "agent"
+                        ? "Describe what to build. Zentra will inspect, implement, and verify…"
+                        : mode === "plan"
+                          ? "What would you like to plan?"
+                          : "Ask a question…"
                   }
                   rows={2}
                   value={draft}
@@ -1000,14 +995,7 @@ export default function App() {
                 Local by default. Changes only with your approval.
                 <span>Enter to send · Shift + Enter for a new line</span>
               </p>
-              {voiceOpen && (
-                <div className="voice-container">
-                  <VoicePanel
-                    state={voice.state}
-                    partials={voice.partials}
-                  />
-                </div>
-              )}
+              {/* Voice panel removed — microphone remains as a toggle button only */}
             </div>
           </div>
         ) : (
