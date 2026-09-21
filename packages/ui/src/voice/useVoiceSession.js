@@ -130,10 +130,10 @@ export default function useVoiceSession(conversationId, onFinal) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       const recorder = new MediaRecorder(stream);
-      recorderRef.current = recorder;
-      const chunks = [];
+      // store both recorder and chunks so stopRecording can access them
+      recorderRef.current = { recorder, chunks: [] };
       recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size) chunks.push(ev.data);
+        if (ev.data && ev.data.size) recorderRef.current.chunks.push(ev.data);
       };
       recorder.start();
       setState("listening");
@@ -144,13 +144,17 @@ export default function useVoiceSession(conversationId, onFinal) {
 
   async function stopRecording() {
     sendEvent("voice.stop");
-    const recorder = recorderRef.current;
-    if (recorder) {
-      if (recorder.type === "recognition") {
+    const rcur = recorderRef.current;
+    if (rcur) {
+      if (rcur.type === "recognition") {
         try {
-          recorder.recog.stop();
+          rcur.recog.stop();
         } catch (e) {}
-      } else if (recorder.state && recorder.state !== "inactive") recorder.stop();
+      } else if (rcur.recorder && rcur.recorder.state && rcur.recorder.state !== "inactive") {
+        try {
+          rcur.recorder.stop();
+        } catch (e) {}
+      }
     }
     const stream = mediaStreamRef.current;
     if (stream) stream.getTracks().forEach((t) => t.stop());
@@ -158,6 +162,7 @@ export default function useVoiceSession(conversationId, onFinal) {
     recorderRef.current = null;
     // upload the full recorded blob for final transcription
     try {
+      const chunks = (recorderRef.current && recorderRef.current.chunks) || [];
       const blob = new Blob(chunks, { type: "audio/webm" });
       const fd = new FormData();
       fd.append("file", blob, "recording.webm");
