@@ -103,6 +103,11 @@ async def ws_voice_session(websocket: WebSocket, conversation_id: str):
                 data = msg["bytes"]
                 manager.receive_audio_chunk(session.id, data)
                 _log(f"ws:{session.id} bytes {len(data)}")
+                # optionally acknowledge reception
+                try:
+                    await websocket.send_json({"event": "stt.chunk", "data": {"len": len(data)}})
+                except Exception:
+                    pass
     except WebSocketDisconnect:
         manager.end_session(session.id)
         _log(f"ws:{session.id} disconnect")

@@ -130,12 +130,25 @@ export default function useVoiceSession(conversationId, onFinal) {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       const recorder = new MediaRecorder(stream);
-      // store both recorder and chunks so stopRecording can access them
+      // use MediaRecorder to collect small chunks and send binary frames over WS
       recorderRef.current = { recorder, chunks: [] };
       recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size) recorderRef.current.chunks.push(ev.data);
+        if (ev.data && ev.data.size) {
+          const reader = new FileReader();
+          reader.onload = () => {
+            try {
+              const arrayBuffer = reader.result;
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(arrayBuffer);
+              }
+            } catch (e) {
+              console.error('ws send chunk failed', e);
+            }
+          };
+          reader.readAsArrayBuffer(ev.data);
+        }
       };
-      recorder.start();
+      recorder.start(250); // emit chunks frequently
       setState("listening");
     } catch (err) {
       console.error("microphone error", err);
@@ -143,6 +156,7 @@ export default function useVoiceSession(conversationId, onFinal) {
   }
 
   async function stopRecording() {
+    // signal stop to server and await stt.final event before inserting text
     sendEvent("voice.stop");
     const rcur = recorderRef.current;
     if (rcur) {
@@ -159,34 +173,8 @@ export default function useVoiceSession(conversationId, onFinal) {
     const stream = mediaStreamRef.current;
     if (stream) stream.getTracks().forEach((t) => t.stop());
     mediaStreamRef.current = null;
+    // clear recorderRef but let server send stt.final; onFinal will be called when ws receives it
     recorderRef.current = null;
-    // upload the full recorded blob for final transcription
-    try {
-      const chunks = (recorderRef.current && recorderRef.current.chunks) || [];
-      const blob = new Blob(chunks, { type: "audio/webm" });
-      const fd = new FormData();
-      fd.append("file", blob, "recording.webm");
-      const API_BASE =
-        (import.meta.env && import.meta.env.VITE_AGENT_API_URL) ||
-        "http://127.0.0.1:8000";
-      const token = await fetch(`${API_BASE}/api/session`).then((r) => r.json()).then((j) => j.token).catch(() => "");
-      const resp = await fetch(`${API_BASE}/api/stt/upload`, {
-        method: "POST",
-        body: fd,
-        headers: { "X-Agent-Token": token },
-      });
-      const result = await resp.json();
-      if (result && result.text) {
-        // send final transcription over websocket so server can forward to orchestrator
-        sendEvent("stt.final", { text: result.text });
-        if (onFinal) onFinal(result.text);
-      } else {
-        // surface error to console
-        console.warn("STT upload returned no text", result);
-      }
-    } catch (err) {
-      console.error("final STT upload failed", err);
-    }
     setState("idle");
   }
 
