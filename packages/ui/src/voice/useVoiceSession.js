@@ -1,194 +1,365 @@
-import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { API_BASE, request } from "../api";
+
+/**
+ * Voice session hook — complete-utterance STT via MediaRecorder + Whisper.
+ *
+ * Supports optional energy VAD auto-stop for hands-free conversation mode.
+ */
+
+const VAD = {
+  // Catch quieter speech; wait longer after you pause so we don't cut mid-thought.
+  speechThreshold: 0.012,
+  silenceThreshold: 0.007,
+  minSpeechMs: 280,
+  silenceMs: 1400,
+  maxUtteranceMs: 45000,
+  pollMs: 40,
+};
 
 export default function useVoiceSession(conversationId, onFinal) {
   const [error, setError] = useState(null);
-  const wsRef = useRef(null);
   const [state, setState] = useState("idle");
-  const [session, setSession] = useState(null);
+  const [statusMessage, setStatusMessage] = useState("");
   const [partials, setPartials] = useState("");
+  const [sttStatus, setSttStatus] = useState(null);
+  const [hearingSpeech, setHearingSpeech] = useState(false);
   const recorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
+  const chunksRef = useRef([]);
+  const onFinalRef = useRef(onFinal);
+  const vadRef = useRef(null);
+  const autoStopRef = useRef(false);
+  const stoppingRef = useRef(false);
 
   useEffect(() => {
-    if (!conversationId) return;
-    const init = async () => {
-      // determine base API URL (prefer env var used by Vite/Electron)
-      const API_BASE =
-        (import.meta.env && import.meta.env.VITE_AGENT_API_URL) ||
-        "http://127.0.0.1:8000";
-      const WS_BASE = API_BASE.replace(/^http/, "ws");
-      // include session token as query param for WebSocket authentication
-      let token = "";
-      try {
-        const tokenResp = await fetch(`${API_BASE}/api/session`);
-        token = await tokenResp.json().then((r) => r.token).catch(() => "");
-      } catch (e) {
-        token = "";
-      }
-      const url = `${WS_BASE}/api/voice/session/${conversationId}?token=${encodeURIComponent(
-        token,
-      )}`;
-      const ws = new WebSocket(url);
-      wsRef.current = ws;
-    ws.onopen = () => {};
-    ws.onmessage = async (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.event === "voice.ready") {
-          setSession(msg.data.session);
-          setState(msg.data.session.state || "idle");
-        }
-        if (msg.event === "voice.state") {
-          setState(msg.data.state);
-        }
-        if (msg.event === "stt.partial") {
-          // keep partials as a string for simple placeholder display
-          setPartials(msg.data.text || "");
-        }
-        if (msg.event === "error") {
-          setError(msg.data?.message || "Voice error");
-        }
-        if (msg.event === "stt.final") {
-          // final transcription arrived
-          const finalText = msg.data?.text || "";
-          setPartials("");
-          try {
-            if (onFinal && finalText) onFinal(finalText);
-          } catch (e) {
-            console.warn("onFinal callback failed", e);
-          }
-          // may contain assistant_response from server; play it via TTS if present
-          const resp = msg.data?.assistant_response;
-          if (resp && resp.response) {
-            try {
-              const tts = await api("/api/tts", { text: resp.response });
-              const blob = await tts.blob();
-              const url = URL.createObjectURL(blob);
-              const audio = new Audio(url);
-              audio.onended = () => URL.revokeObjectURL(url);
-              audio.play().catch(() => {});
-            } catch (err) {
-              // ignore TTS failures
-              console.warn("TTS play failed", err);
-            }
-          }
-        }
-      } catch (err) {
-        console.error("invalid ws msg", err);
-      }
-    };
-      ws.onclose = () => setState("idle");
-      ws.onerror = () => setState("error");
-      ws.onclose = () => setState("idle");
-      return () => {
-        try {
-          ws.close();
-        } catch (e) {}
-      };
-    };
-    init();
-  }, [conversationId]);
+    onFinalRef.current = onFinal;
+  }, [onFinal]);
 
-  function sendEvent(event, payload = {}) {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+  const refreshStatus = useCallback(async () => {
     try {
-      wsRef.current.send(JSON.stringify({ event, ...payload }));
-    } catch (e) {
-      console.error(e);
+      const resp = await request("/api/voice/status");
+      const data = await resp.json();
+      setSttStatus(data.stt || null);
+      if (!data.ok || data.stt?.state === "error") {
+        const msg =
+          data.stt?.error ||
+          "Local speech-to-text provider is unavailable.";
+        setError(msg);
+        setState("unavailable");
+        return data;
+      }
+      return data;
+    } catch (err) {
+      const msg = err?.message || "Unable to reach voice API.";
+      setError(msg);
+      setState("unavailable");
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus, conversationId]);
+
+  function pickMimeType() {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/mp4",
+    ];
+    if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) {
+      return "";
+    }
+    return candidates.find((t) => MediaRecorder.isTypeSupported(t)) || "";
+  }
+
+  function stopVad() {
+    const vad = vadRef.current;
+    vadRef.current = null;
+    setHearingSpeech(false);
+    if (!vad) return;
+    try {
+      if (vad.timer) clearInterval(vad.timer);
+      vad.source?.disconnect();
+      vad.analyser?.disconnect();
+      vad.audioCtx?.close?.();
+    } catch {
+      /* ignore */
     }
   }
 
-  async function startRecording() {
-    if (!wsRef.current) return;
-    sendEvent("voice.start");
+  function startVad(stream, onSilenceEnd) {
+    stopVad();
+    let audioCtx;
     try {
-      // Prefer browser SpeechRecognition for live partials if available
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recog = new SpeechRecognition();
-        recog.continuous = true;
-        recog.interimResults = true;
-        recog.lang = navigator.language || "en-US";
-        recog.onresult = (ev) => {
-          let interim = "";
-          let final = "";
-          for (let i = ev.resultIndex; i < ev.results.length; ++i) {
-            const res = ev.results[i];
-            if (res.isFinal) final += res[0].transcript;
-            else interim += res[0].transcript;
-          }
-          if (interim) setPartials(interim);
-          if (final) {
-            setPartials("");
-            sendEvent("stt.final", { text: final });
-          }
-        };
-        recog.onerror = (e) => {
-          console.warn("SpeechRecognition error", e);
-        };
-        recog.start();
-        recorderRef.current = { type: "recognition", recog };
-        setState("listening");
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-      const recorder = new MediaRecorder(stream);
-      // use MediaRecorder to collect small chunks and send binary frames over WS
-      recorderRef.current = { recorder, chunks: [] };
-      recorder.ondataavailable = (ev) => {
-        if (ev.data && ev.data.size) {
-          const reader = new FileReader();
-          reader.onload = () => {
-            try {
-              const arrayBuffer = reader.result;
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(arrayBuffer);
-              }
-            } catch (e) {
-              console.error('ws send chunk failed', e);
-            }
-          };
-          reader.readAsArrayBuffer(ev.data);
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch {
+      return;
+    }
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.5;
+    source.connect(analyser);
+    const data = new Float32Array(analyser.fftSize);
+
+    const startedAt = Date.now();
+    let speechStartedAt = 0;
+    let lastSpeechAt = 0;
+    let heardSpeech = false;
+
+    const timer = setInterval(() => {
+      if (stoppingRef.current) return;
+      analyser.getFloatTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      const rms = Math.sqrt(sum / data.length);
+      const now = Date.now();
+
+      if (rms >= VAD.speechThreshold) {
+        if (!heardSpeech) {
+          heardSpeech = true;
+          speechStartedAt = now;
+          setHearingSpeech(true);
+          setStatusMessage("Hearing you…");
         }
-      };
-      recorder.start(250); // emit chunks frequently
-      setState("listening");
+        lastSpeechAt = now;
+      } else if (heardSpeech && rms < VAD.silenceThreshold) {
+        const spokeLongEnough = now - speechStartedAt >= VAD.minSpeechMs;
+        const silentLongEnough = now - lastSpeechAt >= VAD.silenceMs;
+        if (spokeLongEnough && silentLongEnough) {
+          stopVad();
+          onSilenceEnd?.();
+          return;
+        }
+      }
+
+      if (now - startedAt >= VAD.maxUtteranceMs) {
+        stopVad();
+        onSilenceEnd?.();
+      }
+    }, VAD.pollMs);
+
+    vadRef.current = { audioCtx, source, analyser, timer };
+  }
+
+  async function uploadRecording(blob) {
+    setState("processing");
+    setStatusMessage("Processing speech...");
+    setPartials("");
+
+    if (sttStatus?.state === "not_loaded" || sttStatus?.state === "loading") {
+      setStatusMessage("Preparing local speech recognition...");
+    }
+
+    const form = new FormData();
+    const filename =
+      blob.type && blob.type.includes("ogg")
+        ? "recording.ogg"
+        : blob.type && blob.type.includes("mp4")
+          ? "recording.m4a"
+          : "recording.webm";
+    form.append("file", blob, filename);
+
+    const response = await request("/api/stt/upload", form);
+    const result = await response.json();
+    const text = (result.text || "").trim();
+
+    if (!text) {
+      setState("error");
+      setStatusMessage("");
+      setError("No speech detected. Please try again.");
+      return "";
+    }
+
+    setState("ready");
+    setStatusMessage("Transcript ready");
+    setError(null);
+    try {
+      if (onFinalRef.current) onFinalRef.current(text);
     } catch (err) {
-      console.error("microphone error", err);
+      console.warn("onFinal callback failed", err);
+      setError(err?.message || "Failed to apply transcript.");
+    }
+    refreshStatus();
+    return text;
+  }
+
+  async function startRecording(options = {}) {
+    const { autoStop = false, onAutoStop = null } = options;
+    autoStopRef.current = !!autoStop;
+    stoppingRef.current = false;
+    setError(null);
+    setPartials("");
+    setStatusMessage("");
+    setHearingSpeech(false);
+
+    const status = await refreshStatus();
+    if (!status?.ok) {
+      setState("unavailable");
+      setError(
+        status?.stt?.error ||
+          "Local speech-to-text provider is unavailable.",
+      );
+      return;
+    }
+
+    if (typeof MediaRecorder === "undefined") {
+      setState("error");
+      setError("MediaRecorder is not supported in this browser.");
+      return;
+    }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          // noiseSuppression can distort speech and hurt Whisper accuracy.
+          noiseSuppression: false,
+          autoGainControl: true,
+        },
+      });
+    } catch (err) {
+      setState("denied");
+      setError(
+        err?.name === "NotAllowedError"
+          ? "Microphone permission denied."
+          : `Microphone error: ${err?.message || err}`,
+      );
+      return;
+    }
+
+    mediaStreamRef.current = stream;
+    chunksRef.current = [];
+
+    const mimeType = pickMimeType();
+    let recorder;
+    try {
+      const recorderOpts = { audioBitsPerSecond: 192000 };
+      if (mimeType) recorderOpts.mimeType = mimeType;
+      try {
+        recorder = new MediaRecorder(stream, recorderOpts);
+      } catch {
+        recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+      }
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+      setState("error");
+      setError(`Could not start recorder: ${err?.message || err}`);
+      return;
+    }
+
+    recorderRef.current = recorder;
+
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        chunksRef.current.push(event.data);
+      }
+    };
+
+    recorder.onerror = (event) => {
+      const msg = event?.error?.message || "MediaRecorder error.";
+      setError(msg);
+      setState("error");
+    };
+
+    try {
+      recorder.start(250);
+      setState("listening");
+      setStatusMessage(
+        autoStop ? "Listening… I’ll catch when you pause" : "Listening...",
+      );
+
+      if (autoStop) {
+        startVad(stream, () => {
+          if (stoppingRef.current) return;
+          if (typeof onAutoStop === "function") onAutoStop();
+        });
+      }
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+      recorderRef.current = null;
+      setState("error");
+      setError(`Could not start recording: ${err?.message || err}`);
     }
   }
 
   async function stopRecording() {
-    // signal stop to server and await stt.final event before inserting text
-    sendEvent("voice.stop");
-    const rcur = recorderRef.current;
-    if (rcur) {
-      if (rcur.type === "recognition") {
-        try {
-          rcur.recog.stop();
-        } catch (e) {}
-      } else if (rcur.recorder && rcur.recorder.state && rcur.recorder.state !== "inactive") {
-        try {
-          rcur.recorder.stop();
-        } catch (e) {}
-      }
+    if (stoppingRef.current) return "";
+    stoppingRef.current = true;
+    stopVad();
+
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      const stream = mediaStreamRef.current;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+      setState((s) => (s === "listening" ? "idle" : s));
+      stoppingRef.current = false;
+      return "";
     }
-    const stream = mediaStreamRef.current;
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
-    // clear recorderRef but let server send stt.final; onFinal will be called when ws receives it
-    recorderRef.current = null;
-    setState("idle");
+
+    setState("processing");
+    setStatusMessage("Processing speech...");
+
+    let transcript = "";
+    await new Promise((resolve) => {
+      const finish = async () => {
+        try {
+          const mime =
+            recorder.mimeType ||
+            (chunksRef.current[0] && chunksRef.current[0].type) ||
+            "audio/webm";
+          const blob = new Blob(chunksRef.current, { type: mime });
+          chunksRef.current = [];
+          transcript = (await uploadRecording(blob)) || "";
+        } catch (err) {
+          console.error("STT upload failed", err);
+          setState("error");
+          setStatusMessage("");
+          setError(err?.message || "Speech transcription failed.");
+        } finally {
+          const stream = mediaStreamRef.current;
+          if (stream) stream.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
+          recorderRef.current = null;
+          stoppingRef.current = false;
+          resolve();
+        }
+      };
+
+      recorder.onstop = finish;
+      try {
+        recorder.stop();
+      } catch (err) {
+        setError(err?.message || "Failed to stop recorder.");
+        setState("error");
+        stoppingRef.current = false;
+        resolve();
+      }
+    });
+    return transcript;
   }
 
   return {
     state,
-    session,
+    error,
+    statusMessage,
     partials,
+    sttStatus,
+    hearingSpeech,
+    apiBase: API_BASE,
     start: startRecording,
     stop: stopRecording,
-    sendFinalTranscription: (text) => sendEvent("stt.final", { text }),
+    clearError: () => setError(null),
+    refreshStatus,
   };
 }

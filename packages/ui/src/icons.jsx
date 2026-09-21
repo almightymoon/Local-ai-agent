@@ -18,9 +18,15 @@ const paths = {
   copy: "M8 8h13v13H8V8Zm8-4V2H2v14h2",
   check: "m5 12 4 4L19 6",
   sun: "M12 1v2m0 18v2M1 12h2m18 0h2M4 4l2 2m12 12 2 2M4 20l2-2M18 6l2-2M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0Z",
+  moon: "M21 14.5A8.5 8.5 0 1 1 9.5 3a7 7 0 0 0 11.5 11.5Z",
   mic: "M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5Zm-3 6v1a6 6 0 0 0 12 0v-1M12 18v4m-4 0h8",
   sound: "m11 4-6 5H2v6h3l6 5V4Zm4 4a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14",
   shield: "m12 2 9 4v6c0 5-9 10-9 10S3 17 3 12V6l9-4Zm-4 10 3 3 5-6",
+  minimize: "M5 12h14",
+  settings: "M4 21v-7M4 10V3m8 18v-9m0-4V3m8 18v-5m0-4V3M1 14h6m2-8h6m2 12h6",
+  edit: "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z",
+  trash: "M3 6h18M8 6V4h8v2m-1 0v14H9V6m-2 4v8m6-8v8",
+  dots: "M12 6h.01M12 12h.01M12 18h.01",
 };
 export function Icon({ name, size = 20, ...props }) {
   return (

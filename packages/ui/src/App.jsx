@@ -5,6 +5,8 @@ import "./styles.css";
 import useVoiceSession from "./voice/useVoiceSession";
 import VoiceButton from "./voice/VoiceButton";
 import VoiceToast from "./voice/VoiceToast";
+import VoiceConversation from "./voice/VoiceConversation";
+import { speakText, getTtsPreferences, setTtsPreferences } from "./voice/speakLocal";
 
 const starters = [
   {
@@ -42,6 +44,27 @@ const newChat = () => ({
   messages: [],
   updated: Date.now(),
 });
+function groupChatsByDate(chats) {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const today = startOfToday.getTime();
+  const yesterday = today - 86400000;
+  const week = today - 7 * 86400000;
+  const buckets = [
+    { label: "Today", items: [] },
+    { label: "Yesterday", items: [] },
+    { label: "Previous 7 days", items: [] },
+    { label: "Older", items: [] },
+  ];
+  for (const chat of chats) {
+    const t = chat.updated || 0;
+    if (t >= today) buckets[0].items.push(chat);
+    else if (t >= yesterday) buckets[1].items.push(chat);
+    else if (t >= week) buckets[2].items.push(chat);
+    else buckets[3].items.push(chat);
+  }
+  return buckets.filter((b) => b.items.length);
+}
 function loadChats() {
   try {
     const saved = JSON.parse(
@@ -157,6 +180,13 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => localStorage.getItem("zentra_theme") || "dark",
   );
+  const [ttsVoice, setTtsVoice] = useState(
+    () => getTtsPreferences().voice,
+  );
+  const [ttsRate, setTtsRate] = useState(() => getTtsPreferences().rate);
+  const [ttsVoices, setTtsVoices] = useState([]);
+  const [ttsRates, setTtsRates] = useState([]);
+  const [ttsPreviewBusy, setTtsPreviewBusy] = useState(false);
   const [draft, setDraft] = useState("");
   const [mode, setMode] = useState("agent");
   const [busy, setBusy] = useState(false);
@@ -177,18 +207,38 @@ export default function App() {
   const [recording, setRecording] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [pendingDeletes, setPendingDeletes] = useState([]);
+  const [editingId, setEditingId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
   const controller = useRef(null),
     end = useRef(null),
     input = useRef(null),
     recorder = useRef(null);
   const active = chats.find((chat) => chat.id === activeId) || chats[0];
   const [voiceFinalPending, setVoiceFinalPending] = useState(false);
+  const [voiceConversationOpen, setVoiceConversationOpen] = useState(false);
+  const voiceConversationRef = useRef(false);
   const voice = useVoiceSession(active?.id, (finalText) => {
-    // insert final transcription into draft
-    setDraft((d) => (d ? d + " " + finalText : finalText));
+    // Dictate-to-composer only; conversation mode consumes the transcript itself.
+    if (voiceConversationRef.current) return;
+    setDraft((d) => (d ? `${d} ${finalText}` : finalText));
     setVoiceFinalPending(false);
+    setVoiceOpen(false);
   });
   const [voiceError, setVoiceError] = useState(null);
+  useEffect(() => {
+    if (voice.error) setVoiceError(voice.error);
+  }, [voice.error]);
+  useEffect(() => {
+    if (voiceConversationOpen) return;
+    if (
+      voice.state === "unavailable" ||
+      voice.state === "denied" ||
+      voice.state === "error"
+    ) {
+      setVoiceOpen(false);
+      setVoiceFinalPending(false);
+    }
+  }, [voice.state, voiceConversationOpen]);
   const pending = active.messages.findLast(
     (m) => m.action && !m.decided && m.action.expires * 1000 > Date.now(),
   );
@@ -218,6 +268,32 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("zentra_theme", theme);
   }, [theme]);
+  useEffect(() => {
+    setTtsPreferences({ voice: ttsVoice, rate: ttsRate });
+  }, [ttsVoice, ttsRate]);
+  useEffect(() => {
+    if (page !== "settings") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api("/api/tts/voices");
+        if (cancelled) return;
+        setTtsVoices(data.voices || []);
+        setTtsRates(data.rates || []);
+        if (data.voice && !localStorage.getItem("zentra_tts_voice")) {
+          setTtsVoice(data.voice);
+        }
+        if (data.rate && !localStorage.getItem("zentra_tts_rate")) {
+          setTtsRate(data.rate);
+        }
+      } catch (err) {
+        if (!cancelled) setNotice(err.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [page]);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" });
   }, [active.messages, busy]);
@@ -283,21 +359,32 @@ export default function App() {
       ),
     );
   }
-  async function runStream(path, body, chatId, messageId) {
+  async function runStream(path, body, chatId, messageId, { throwOnError = false, onDelta } = {}) {
     setBusy(true);
     setNotice("");
     controller.current = new AbortController();
     let finished = false;
+    let fullText = "";
     try {
       await stream(
         path,
         body,
         (event, data) => {
-          if (event === "message")
+          if (event === "message") {
+            const piece = data.text || "";
+            fullText += piece;
             updateMessage(chatId, messageId, (m) => ({
               ...m,
-              text: m.text + data.text,
+              text: m.text + piece,
             }));
+            if (piece && typeof onDelta === "function") {
+              try {
+                onDelta(piece, fullText);
+              } catch {
+                /* ignore speech callback errors */
+              }
+            }
+          }
           if (event === "tool_start")
             updateMessage(chatId, messageId, (m) => ({
               ...m,
@@ -345,6 +432,7 @@ export default function App() {
         throw new Error(
           "Connection ended before the agent finished. Check its action history before retrying.",
         );
+      return fullText;
     } catch (err) {
       updateMessage(chatId, messageId, (m) => ({
         ...m,
@@ -353,16 +441,25 @@ export default function App() {
             ? "Response stopped. An already approved action may still finish."
             : err.message,
       }));
+      if (throwOnError && err.name !== "AbortError") throw err;
+      return fullText;
     } finally {
       setBusy(false);
       controller.current = null;
       input.current?.focus();
     }
   }
-  async function send(event) {
-    event?.preventDefault();
-    const text = draft.trim();
-    if (!text || busy || controller.current || pending) return;
+  async function sendText(text, chatMode = mode, { onDelta } = {}) {
+    const cleaned = String(text || "").trim();
+    if (!cleaned) return "";
+    if (pending) {
+      throw new Error(
+        "A tool action is waiting for approval in chat. Finish that first.",
+      );
+    }
+    if (busy || controller.current) {
+      throw new Error("Zentra is still responding. Try again in a moment.");
+    }
     const id = crypto.randomUUID();
     const chatId = active.id;
     const history = active.messages
@@ -374,11 +471,11 @@ export default function App() {
         chat.id === chatId
           ? {
               ...chat,
-              title: chat.messages.length ? chat.title : text.slice(0, 44),
+              title: chat.messages.length ? chat.title : cleaned.slice(0, 44),
               updated: Date.now(),
               messages: [
                 ...chat.messages,
-                { id: crypto.randomUUID(), role: "user", text },
+                { id: crypto.randomUUID(), role: "user", text: cleaned },
                 { id, role: "assistant", text: "" },
               ],
             }
@@ -386,12 +483,19 @@ export default function App() {
       ),
     );
     setDraft("");
-    await runStream(
+    return runStream(
       "/api/chat/stream",
-      { message: text, history, mode },
+      { message: cleaned, history, mode: chatMode },
       chatId,
       id,
+      { throwOnError: true, onDelta },
     );
+  }
+  async function send(event) {
+    event?.preventDefault();
+    const text = draft.trim();
+    if (!text || busy || controller.current || pending) return;
+    await sendText(text, mode).catch(() => {});
   }
   async function decide(message, approved) {
     if (busy || controller.current) return;
@@ -490,12 +594,7 @@ export default function App() {
   }
   async function speak(text) {
     try {
-      const response = await request("/api/tts", { text });
-      const url = URL.createObjectURL(await response.blob());
-      const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
-      audio.onerror = () => URL.revokeObjectURL(url);
-      await audio.play();
+      await speakText(text);
     } catch (err) {
       setNotice(err.message);
     }
@@ -545,6 +644,58 @@ export default function App() {
     skills: "Skills & tools",
     activity: "Activity & approvals",
     quickstart: "Quick Start",
+    settings: "Settings",
+  };
+  const filteredChats = chats.filter((c) =>
+    c.title.toLowerCase().includes(query.toLowerCase()),
+  );
+  const chatGroups = groupChatsByDate(filteredChats);
+  const renameChat = (chatId, title) => {
+    const next = title.trim().slice(0, 80) || "New conversation";
+    setChats((prev) =>
+      prev.map((c) =>
+        c.id === chatId ? { ...c, title: next, updated: Date.now() } : c,
+      ),
+    );
+    setEditingId(null);
+    setEditTitle("");
+  };
+  const deleteChat = (chat) => {
+    if (!window.confirm(`Delete conversation "${chat.title}"?`)) return;
+    setChats((prev) => {
+      const remaining = prev.filter((c) => c.id !== chat.id);
+      return remaining.length ? remaining : [newChat()];
+    });
+    const timer = setTimeout(() => {
+      setPendingDeletes((p) => p.filter((d) => d.id !== chat.id));
+    }, 6000);
+    setPendingDeletes((p) => [...p, { ...chat, timer }]);
+    if (active.id === chat.id) {
+      setTimeout(() => {
+        setChats((prev) => {
+          if (prev.length) {
+            setActiveId(prev[0].id);
+            return prev;
+          }
+          const nc = newChat();
+          setActiveId(nc.id);
+          return [nc, ...prev];
+        });
+      }, 0);
+    }
+  };
+  const clearAllChats = () => {
+    if (
+      !window.confirm(
+        "Delete all conversations? This cannot be undone from this device.",
+      )
+    )
+      return;
+    const chat = newChat();
+    setChats([chat]);
+    setActiveId(chat.id);
+    setNotice("All conversations cleared.");
+    navigate("chat");
   };
   return (
     <div className={`app ${sidebar ? "" : "sidebar-closed"}`}>
@@ -559,9 +710,12 @@ export default function App() {
         <div className="brand-row">
           <button className="brand" onClick={() => navigate("chat")}>
             <span className="brand-mark">
-              <Icon name="spark" size={22} />
+              <Icon name="spark" size={20} />
             </span>
-            Zentra<span className="local-label">local</span>
+            <span className="brand-text">
+              Zentra
+              <span className="local-label">local</span>
+            </span>
           </button>
           <button
             className="icon-button"
@@ -572,105 +726,167 @@ export default function App() {
           </button>
         </div>
         <button className="new-chat" onClick={startChat} disabled={busy}>
-          <Icon name="plus" size={18} />
-          New chat<kbd>⌘ N</kbd>
+          <Icon name="plus" size={16} />
+          New chat
+          <kbd>⌘N</kbd>
         </button>
-        <nav aria-label="Main navigation">
+        <nav className="sidebar-nav" aria-label="Main navigation">
           {[
-            ["chat", "chat", "Conversations"],
+            ["chat", "chat", "Chats"],
             ["workspace", "folder", "Workspace"],
             ["memory", "memory", "Memory"],
             ["skills", "spark", "Skills & tools"],
-            ["activity", "shield", "Activity & approvals"],
+            ["activity", "shield", "Activity"],
           ].map(([id, icon, label]) => (
             <button
               key={id}
               className={`nav-item ${page === id ? "active" : ""}`}
               onClick={() => navigate(id)}
             >
-              <Icon name={icon} size={18} />
-              {label}
+              <Icon name={icon} size={17} />
+              <span>{label}</span>
               {id === "chat" && (
                 <span className="nav-count">{chats.length}</span>
               )}
             </button>
           ))}
         </nav>
-        <div className="history-label">RECENT CONVERSATIONS</div>
-        <label className="search-chats">
-          <Icon name="search" size={15} />
-          <input
-            aria-label="Search conversations"
-            placeholder="Search conversations"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </label>
-        <div className="chat-history">
-          {chats
-            .filter((c) => c.title.toLowerCase().includes(query.toLowerCase()))
-            .map((chat) => (
-              <div key={chat.id} className="history-item-row">
-                <button
-                  disabled={busy && chat.id !== active.id}
-                  className={`history-item ${active.id === chat.id && page === "chat" ? "selected" : ""}`}
-                  onClick={() => {
-                    setActiveId(chat.id);
-                    navigate("chat");
-                    setDraft("");
-                  }}
-                >
-                  <span>{chat.title}</span>
-                  <Icon name="chevron" size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="icon-button text-button delete-chat"
-                  title={`Delete ${chat.title}`}
-                  disabled={busy}
-                  onClick={() => {
-                    if (!window.confirm(`Delete conversation "${chat.title}"?`))
-                      return;
-                    setChats((prev) => {
-                      const remaining = prev.filter((c) => c.id !== chat.id);
-                      return remaining.length ? remaining : [newChat()];
-                    });
-                    const timer = setTimeout(() => {
-                      setPendingDeletes((p) =>
-                        p.filter((d) => d.id !== chat.id),
-                      );
-                    }, 6000);
-                    setPendingDeletes((p) => [...p, { ...chat, timer }]);
-                    if (active.id === chat.id) {
-                      setTimeout(() => {
-                        setChats((prev) => {
-                          if (prev.length) {
-                            setActiveId(prev[0].id);
-                            return prev;
-                          }
-                          const nc = newChat();
-                          setActiveId(nc.id);
-                          return [nc, ...prev];
-                        });
-                      }, 0);
-                    }
-                  }}
-                >
-                  <Icon name="close" size={13} />
-                </button>
+        <div className="history-section">
+          <div className="history-header">
+            <span className="history-label">Conversations</span>
+            {chats.length > 1 && (
+              <button
+                type="button"
+                className="text-button history-clear"
+                onClick={clearAllChats}
+                disabled={busy}
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <label className="search-chats">
+            <Icon name="search" size={14} />
+            <input
+              aria-label="Search conversations"
+              placeholder="Search chats"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button
+                type="button"
+                className="icon-button search-clear"
+                aria-label="Clear search"
+                onClick={() => setQuery("")}
+              >
+                <Icon name="close" size={12} />
+              </button>
+            )}
+          </label>
+          <div className="chat-history">
+            {chatGroups.length === 0 && (
+              <p className="history-empty">
+                {query ? "No matching chats" : "No conversations yet"}
+              </p>
+            )}
+            {chatGroups.map((group) => (
+              <div className="history-group" key={group.label}>
+                <div className="history-group-label">{group.label}</div>
+                {group.items.map((chat) => (
+                  <div
+                    key={chat.id}
+                    className={`history-item-row ${
+                      active.id === chat.id && page === "chat" ? "selected" : ""
+                    }`}
+                  >
+                    {editingId === chat.id ? (
+                      <form
+                        className="rename-form"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          renameChat(chat.id, editTitle);
+                        }}
+                      >
+                        <input
+                          autoFocus
+                          value={editTitle}
+                          maxLength={80}
+                          aria-label="Rename conversation"
+                          onChange={(e) => setEditTitle(e.target.value)}
+                          onBlur={(e) => {
+                            if (e.target.dataset.cancel === "1") return;
+                            renameChat(chat.id, editTitle);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") {
+                              e.target.dataset.cancel = "1";
+                              setEditingId(null);
+                              setEditTitle("");
+                            }
+                          }}
+                        />
+                      </form>
+                    ) : (
+                      <>
+                        <button
+                          disabled={busy && chat.id !== active.id}
+                          className={`history-item ${
+                            active.id === chat.id && page === "chat"
+                              ? "selected"
+                              : ""
+                          }`}
+                          onClick={() => {
+                            setActiveId(chat.id);
+                            navigate("chat");
+                            setDraft("");
+                          }}
+                        >
+                          <Icon name="chat" size={14} />
+                          <span>{chat.title}</span>
+                        </button>
+                        <div className="history-actions">
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title="Rename"
+                            aria-label={`Rename ${chat.title}`}
+                            disabled={busy}
+                            onClick={() => {
+                              setEditingId(chat.id);
+                              setEditTitle(chat.title);
+                            }}
+                          >
+                            <Icon name="edit" size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title="Delete"
+                            aria-label={`Delete ${chat.title}`}
+                            disabled={busy}
+                            onClick={() => deleteChat(chat)}
+                          >
+                            <Icon name="trash" size={13} />
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
               </div>
             ))}
+          </div>
         </div>
 
         {pendingDeletes.length > 0 && (
           <div className="snackbar" role="status">
             <div>Conversation deleted</div>
-            <div style={{ display: "flex", gap: 8 }}>
+            <div className="snackbar-actions">
               {pendingDeletes.map((d) => (
                 <button
                   key={d.id}
                   onClick={() => {
-                    // undo: clear timeout and restore
                     clearTimeout(d.timer);
                     setPendingDeletes((p) => p.filter((x) => x.id !== d.id));
                     setChats((prev) => [d, ...prev]);
@@ -685,23 +901,28 @@ export default function App() {
         )}
         <div className="sidebar-bottom">
           <button
-            className={`quick-link ${page === "quickstart" ? "active" : ""}`}
+            className={`nav-item ${page === "quickstart" ? "active" : ""}`}
             onClick={() => navigate("quickstart")}
           >
-            <span className="quick-icon">
-              <Icon name="book" size={18} />
-            </span>
-            <span>
-              <strong>Quick Start</strong>
-              <small>A little setup. A lot of possibility.</small>
-            </span>
-            <Icon name="chevron" size={14} />
+            <Icon name="book" size={17} />
+            <span>Quick Start</span>
+          </button>
+          <button
+            className={`nav-item ${page === "settings" ? "active" : ""}`}
+            onClick={() => navigate("settings")}
+          >
+            <Icon name="settings" size={17} />
+            <span>Settings</span>
           </button>
           <div className="profile-row">
             <span className="avatar">Y</span>
-            <div>
+            <div className="profile-meta">
               <strong>Your local space</strong>
-              <small>On your device. In your control.</small>
+              <small>
+                {status?.available
+                  ? status.model || "Model ready"
+                  : "Setup needed"}
+              </small>
             </div>
             <button
               className="icon-button"
@@ -709,7 +930,7 @@ export default function App() {
               aria-label="Toggle light / dark theme"
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
             >
-              <Icon name="sun" size={18} />
+              <Icon name={theme === "dark" ? "sun" : "moon"} size={17} />
             </button>
           </div>
         </div>
@@ -727,7 +948,11 @@ export default function App() {
               </button>
             )}
             <span className="page-title">
-              {page === "chat" ? "Zentra" : pageNames[page]}
+              {page === "chat"
+                ? active.messages.length
+                  ? active.title
+                  : "Zentra"
+                : pageNames[page]}
             </span>
             {page === "chat" && (
               <span className="model-label">
@@ -735,20 +960,33 @@ export default function App() {
               </span>
             )}
           </div>
-          <button
-            className="connection"
-            title={status?.notes}
-            onClick={() => navigate("quickstart")}
-          >
-            <span
-              className={`status-dot ${status?.available ? "online" : ""}`}
-            />
-            {status?.available
-              ? "Running locally"
-              : status
-                ? "Setup needed"
-                : "Connecting"}
-          </button>
+          <div className="topbar-actions">
+            {page === "chat" && (
+              <button
+                className="ghost-chip"
+                onClick={startChat}
+                disabled={busy}
+                title="New chat"
+              >
+                <Icon name="plus" size={14} />
+                New chat
+              </button>
+            )}
+            <button
+              className="connection"
+              title={status?.notes}
+              onClick={() => navigate(status?.available ? "settings" : "quickstart")}
+            >
+              <span
+                className={`status-dot ${status?.available ? "online" : ""}`}
+              />
+              {status?.available
+                ? "Running locally"
+                : status
+                  ? "Setup needed"
+                  : "Connecting"}
+            </button>
+          </div>
         </header>
         {notice && (
           <div className="notice" role="status">
@@ -770,20 +1008,12 @@ export default function App() {
               {active.messages.length === 0 ? (
                 <section className="welcome">
                   <div className="welcome-symbol">
-                    <Icon name="spark" size={30} />
+                    <Icon name="spark" size={28} />
                   </div>
-                  <div className="eyebrow">
-                    A LITTLE LESS FRICTION. A LITTLE MORE FLOW.
-                  </div>
-                  <h1>
-                    What would you like
-                    <br />
-                    to build with Zentra?
-                  </h1>
+                  <h1>How can I help you today?</h1>
                   <p>
-                    A thinking partner for your code, ideas, and everyday work.
-                    <br className="desktop-break" /> Powered by your local
-                    model. Guided by you.
+                    Your local coding partner — inspect, plan, and build with
+                    approval before anything changes.
                   </p>
                   <div className="starters">
                     {starters.map((starter) => (
@@ -794,10 +1024,11 @@ export default function App() {
                           input.current?.focus();
                         }}
                       >
-                        <Icon name={starter.icon} />
-                        <strong>{starter.title}</strong>
-                        <span>{starter.description}</span>
-                        <Icon name="chevron" size={15} />
+                        <Icon name={starter.icon} size={18} />
+                        <div>
+                          <strong>{starter.title}</strong>
+                          <span>{starter.description}</span>
+                        </div>
                       </button>
                     ))}
                   </div>
@@ -900,17 +1131,23 @@ export default function App() {
                   ref={input}
                   aria-label="Message Zentra"
                   placeholder={
-                    voiceOpen
-                      ? voice.partials && voice.partials.length > 0
-                        ? voice.partials
-                        : "Listening…"
-                      : pending
-                        ? "Review the proposed action above to continue…"
-                        : mode === "agent"
-                          ? "Describe what to build. Zentra will inspect, implement, and verify…"
-                          : mode === "plan"
-                            ? "What would you like to plan?"
-                            : "Ask a question…"
+                    voice.state === "listening"
+                      ? voice.statusMessage || "Listening…"
+                      : voice.state === "processing"
+                        ? voice.statusMessage || "Processing speech…"
+                        : voice.state === "unavailable"
+                          ? "STT unavailable"
+                          : voice.state === "denied"
+                            ? "Microphone denied"
+                            : voiceOpen
+                              ? "Listening…"
+                              : pending
+                                ? "Review the proposed action above to continue…"
+                                : mode === "agent"
+                                  ? "Describe what to build. Zentra will inspect, implement, and verify…"
+                                  : mode === "plan"
+                                    ? "What would you like to plan?"
+                                    : "Ask a question…"
                   }
                   rows={2}
                   value={draft}
@@ -964,23 +1201,53 @@ export default function App() {
                     Browse workspace
                   </button>
                   <div className="row">
-                    <VoiceButton
-                      recording={voiceOpen}
+                    <button
+                      type="button"
+                      className={`icon-button ${voiceConversationOpen ? "recording" : ""}`}
+                      aria-label="Start voice conversation"
+                      title="Voice conversation"
                       onClick={() => {
-                        // toggle voice recording
                         if (voiceOpen) {
                           voice.stop();
                           setVoiceOpen(false);
+                        }
+                        voiceConversationRef.current = true;
+                        setVoiceConversationOpen(true);
+                        setVoiceError(null);
+                        voice.clearError?.();
+                      }}
+                    >
+                      <Icon name="sound" size={18} />
+                    </button>
+                    <VoiceButton
+                      recording={voiceOpen || voice.state === "listening"}
+                      onClick={async () => {
+                        if (voiceConversationOpen) return;
+                        if (
+                          voiceOpen ||
+                          voice.state === "listening" ||
+                          voice.state === "processing"
+                        ) {
+                          if (voice.state === "processing") return;
+                          setVoiceOpen(false);
+                          await voice.stop();
+                          setVoiceFinalPending(false);
                         } else {
-                          // stop any playing TTS or audio from the app before starting
-                          if (voice && voice.stopPlayback) voice.stopPlayback();
-                          voice.start();
+                          setVoiceError(null);
+                          voice.clearError?.();
                           setVoiceOpen(true);
                           setVoiceFinalPending(true);
+                          await voice.start();
                         }
                       }}
                     />
-                    <VoiceToast message={voiceError} onClose={() => setVoiceError(null)} />
+                    <VoiceToast
+                      message={voiceError}
+                      onClose={() => {
+                        setVoiceError(null);
+                        voice.clearError?.();
+                      }}
+                    />
                     {busy ? (
                       <button
                         type="button"
@@ -1381,10 +1648,239 @@ export default function App() {
                   </div>
                 </>
               )}
+              {page === "settings" && (
+                <>
+                  <p className="page-intro">
+                    Appearance, voice, model connection, and local data for this
+                    device.
+                  </p>
+                  <div className="settings-grid">
+                    <section className="settings-card">
+                      <div className="settings-card-head">
+                        <Icon name={theme === "dark" ? "moon" : "sun"} />
+                        <div>
+                          <h3>Appearance</h3>
+                          <p>Choose how Zentra looks on this device.</p>
+                        </div>
+                      </div>
+                      <div className="theme-toggle" role="group" aria-label="Theme">
+                        <button
+                          type="button"
+                          className={theme === "dark" ? "active" : ""}
+                          onClick={() => setTheme("dark")}
+                        >
+                          <Icon name="moon" size={15} />
+                          Dark
+                        </button>
+                        <button
+                          type="button"
+                          className={theme === "light" ? "active" : ""}
+                          onClick={() => setTheme("light")}
+                        >
+                          <Icon name="sun" size={15} />
+                          Light
+                        </button>
+                      </div>
+                    </section>
+                    <section className="settings-card">
+                      <div className="settings-card-head">
+                        <Icon name="sound" />
+                        <div>
+                          <h3>Voice</h3>
+                          <p>
+                            Choose the speaking voice for conversation mode and
+                            read-aloud. Free neural voices via edge-tts.
+                          </p>
+                        </div>
+                      </div>
+                      <label className="settings-field">
+                        <span>Speaker</span>
+                        <select
+                          value={ttsVoice}
+                          onChange={(e) => setTtsVoice(e.target.value)}
+                          aria-label="TTS voice"
+                        >
+                          {(ttsVoices.length
+                            ? ttsVoices
+                            : [{ id: ttsVoice, name: ttsVoice, locale: "", style: "" }]
+                          ).map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.name}
+                              {v.locale ? ` (${v.locale})` : ""}
+                              {v.gender ? ` · ${v.gender}` : ""}
+                              {v.style ? ` — ${v.style}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field">
+                        <span>Speaking speed</span>
+                        <select
+                          value={ttsRate}
+                          onChange={(e) => setTtsRate(e.target.value)}
+                          aria-label="TTS speaking rate"
+                        >
+                          {(ttsRates.length
+                            ? ttsRates
+                            : [
+                                { id: "+0%", label: "Normal" },
+                                { id: "+15%", label: "Slightly fast" },
+                                { id: "+25%", label: "Fast" },
+                                { id: "+40%", label: "Very fast" },
+                                { id: "-10%", label: "Slightly slow" },
+                              ]
+                          ).map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.label} ({r.id})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="settings-actions">
+                        <button
+                          type="button"
+                          className="secondary"
+                          disabled={ttsPreviewBusy}
+                          onClick={async () => {
+                            setTtsPreviewBusy(true);
+                            try {
+                              setTtsPreferences({
+                                voice: ttsVoice,
+                                rate: ttsRate,
+                              });
+                              await speakText(
+                                "Hi, I'm Zentra. This is how I sound with your selected voice.",
+                              );
+                            } catch (err) {
+                              setNotice(err.message);
+                            } finally {
+                              setTtsPreviewBusy(false);
+                            }
+                          }}
+                        >
+                          <Icon name="sound" size={15} />
+                          {ttsPreviewBusy ? "Playing…" : "Preview voice"}
+                        </button>
+                      </div>
+                    </section>
+                    <section className="settings-card">
+                      <div className="settings-card-head">
+                        <Icon name="terminal" />
+                        <div>
+                          <h3>Local model</h3>
+                          <p>
+                            {status?.notes ||
+                              "Checking connection to your local model…"}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="settings-row">
+                        <div>
+                          <strong>
+                            {status?.model || "Local model"}
+                          </strong>
+                          <small>
+                            {status?.available
+                              ? "Connected and ready"
+                              : "Not connected"}
+                          </small>
+                        </div>
+                        <button className="secondary" onClick={refreshStatus}>
+                          Refresh
+                        </button>
+                      </div>
+                      {!status?.available && (
+                        <button
+                          className="primary settings-cta"
+                          onClick={() => navigate("quickstart")}
+                        >
+                          Open Quick Start
+                          <Icon name="arrow" size={15} />
+                        </button>
+                      )}
+                    </section>
+                    <section className="settings-card">
+                      <div className="settings-card-head">
+                        <Icon name="chat" />
+                        <div>
+                          <h3>Conversations</h3>
+                          <p>
+                            {chats.length} saved locally in this browser.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="settings-actions">
+                        <button
+                          className="secondary"
+                          onClick={startChat}
+                          disabled={busy}
+                        >
+                          <Icon name="plus" size={15} />
+                          New chat
+                        </button>
+                        <button
+                          className="secondary danger"
+                          onClick={clearAllChats}
+                          disabled={busy || chats.length < 2}
+                        >
+                          <Icon name="trash" size={15} />
+                          Clear all chats
+                        </button>
+                      </div>
+                    </section>
+                    <section className="settings-card">
+                      <div className="settings-card-head">
+                        <Icon name="shield" />
+                        <div>
+                          <h3>Privacy</h3>
+                          <p>
+                            Chats, memory, and approvals stay on your machine.
+                            Tool changes still need your approval.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="settings-links">
+                        <button
+                          className="text-button"
+                          onClick={() => navigate("memory")}
+                        >
+                          Manage memory
+                        </button>
+                        <button
+                          className="text-button"
+                          onClick={() => navigate("activity")}
+                        >
+                          View activity
+                        </button>
+                        <button
+                          className="text-button"
+                          onClick={() => navigate("skills")}
+                        >
+                          Skills & tools
+                        </button>
+                      </div>
+                    </section>
+                  </div>
+                </>
+              )}
             </section>
           </div>
         )}
       </main>
+      <VoiceConversation
+        open={voiceConversationOpen}
+        voice={voice}
+        busy={busy}
+        onClose={() => {
+          voiceConversationRef.current = false;
+          setVoiceConversationOpen(false);
+        }}
+        onSendTurn={async (userText, { onDelta } = {}) => {
+          // Ask mode keeps voice turns conversational (no tool-approval stalls).
+          if (page !== "chat") navigate("chat");
+          return sendText(userText, "ask", { onDelta });
+        }}
+      />
     </div>
   );
 }

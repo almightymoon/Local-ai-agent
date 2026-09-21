@@ -1,8 +1,16 @@
-import time
+"""In-memory voice session manager.
+
+v0.1 transcription uses HTTP upload (POST /api/stt/upload), not WebSocket
+audio streaming. Session state remains available for future real-time voice.
+"""
+
+from __future__ import annotations
+
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 
 @dataclass
@@ -33,143 +41,49 @@ class VoiceManager:
     def __init__(self):
         self.sessions: Dict[str, VoiceSession] = {}
         self.lock = threading.Lock()
-        # per-session audio buffers (list of bytes)
+        # Optional per-session buffers for future WS streaming (unused by v0.1 STT).
         self.buffers: Dict[str, bytearray] = {}
-        # background partial worker control
-        self._worker_events: Dict[str, threading.Event] = {}
-        self._worker_threads: Dict[str, threading.Thread] = {}
 
     def create_session(self, conversation_id: str) -> VoiceSession:
         with self.lock:
             sid = str(uuid.uuid4())
-            s = VoiceSession(id=sid, conversation_id=conversation_id)
-            self.sessions[sid] = s
+            session = VoiceSession(id=sid, conversation_id=conversation_id)
+            self.sessions[sid] = session
             self.buffers[sid] = bytearray()
-            return s
+            return session
 
     def get_session(self, sid: str) -> VoiceSession:
         return self.sessions[sid]
 
-    def end_session(self, sid: str):
+    def end_session(self, sid: str) -> None:
         with self.lock:
-            try:
-                self.sessions.pop(sid, None)
-                self.buffers.pop(sid, None)
-                # stop any worker
-                ev = self._worker_events.pop(sid, None)
-                if ev:
-                    ev.set()
-                thr = self._worker_threads.pop(sid, None)
-                if thr and thr.is_alive():
-                    try:
-                        thr.join(timeout=0.1)
-                    except Exception:
-                        pass
-            except KeyError:
-                pass
+            self.sessions.pop(sid, None)
+            self.buffers.pop(sid, None)
 
-    def start_listening(self, sid: str):
-        s = self.get_session(sid)
-        s.state = "listening"
-        s.last_activity = time.time()
+    def start_listening(self, sid: str) -> None:
+        session = self.get_session(sid)
+        session.state = "listening"
+        session.last_activity = time.time()
 
-    def stop_listening(self, sid: str):
-        s = self.get_session(sid)
-        s.state = "transcribing"
-        s.last_activity = time.time()
+    def stop_listening(self, sid: str) -> None:
+        session = self.get_session(sid)
+        session.state = "idle"
+        session.last_activity = time.time()
 
-    def receive_audio_chunk(self, sid: str, chunk: bytes):
-        s = self.get_session(sid)
-        s.last_activity = time.time()
-        # append to session buffer for later transcription
+    def receive_audio_chunk(self, sid: str, chunk: bytes) -> None:
+        session = self.get_session(sid)
+        session.last_activity = time.time()
         buf = self.buffers.get(sid)
         if buf is None:
             self.buffers[sid] = bytearray(chunk)
         else:
-            try:
-                buf.extend(chunk)
-            except Exception:
-                # if extend fails, replace buffer with new
-                self.buffers[sid] = bytearray(chunk)
-        s.state = "listening"
+            buf.extend(chunk)
+        session.state = "listening"
 
     def collect_session_audio(self, sid: str) -> bytes:
-        """Return concatenated audio bytes for a session if buffered.
-
-        Note: currently manager does not buffer; this method is a placeholder
-        used by the router to request audio for final transcription if present.
-        """
         buf = self.buffers.get(sid)
         if not buf:
             return b""
-        # return bytes and clear buffer
         data = bytes(buf)
         self.buffers[sid] = bytearray()
         return data
-
-    def peek_session_audio(self, sid: str) -> bytes:
-        """Return a snapshot copy of the current buffer without clearing it."""
-        buf = self.buffers.get(sid)
-        if not buf:
-            return b""
-        return bytes(buf)
-
-    def start_partial_worker(self, sid: str, stt_callable, partial_callback, interval: float = 2.0, min_bytes: int = 16000):
-        """Start a background thread that periodically snapshots audio and calls stt_callable, sending partials via partial_callback(sid, text)."""
-        if sid in self._worker_threads:
-            return
-        stop_ev = threading.Event()
-        self._worker_events[sid] = stop_ev
-
-        def _worker():
-            last_len = 0
-            while not stop_ev.is_set():
-                try:
-                    snapshot = self.peek_session_audio(sid)
-                    if snapshot and len(snapshot) >= min_bytes and len(snapshot) > last_len:
-                        try:
-                            text = stt_callable(snapshot)
-                        except Exception:
-                            text = None
-                        if text:
-                            try:
-                                partial_callback(sid, text)
-                            except Exception:
-                                pass
-                        last_len = len(snapshot)
-                except Exception:
-                    pass
-                stop_ev.wait(interval)
-
-        thr = threading.Thread(target=_worker, daemon=True)
-        self._worker_threads[sid] = thr
-        thr.start()
-
-    def stop_partial_worker(self, sid: str):
-        ev = self._worker_events.pop(sid, None)
-        if ev:
-            ev.set()
-        thr = self._worker_threads.pop(sid, None)
-        if thr and thr.is_alive():
-            try:
-                thr.join(timeout=0.1)
-            except Exception:
-                pass
-
-    def submit_audio_for_transcription(self, sid: str, stt_callable, audio_bytes: bytes, callback=None):
-        """Run transcription in background thread and call callback with result."""
-
-        def _worker():
-            try:
-                text = stt_callable(audio_bytes)
-            except Exception as e:
-                text = None
-            if callback:
-                try:
-                    callback(sid, text)
-                except Exception:
-                    pass
-
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-

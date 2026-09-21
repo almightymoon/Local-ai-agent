@@ -5,6 +5,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ["DB_PATH"] = "/tmp/local-agent-tests-bootstrap.sqlite3"
+# Unit tests must never download Whisper models or hit live TTS.
+os.environ["STT_PROVIDER"] = "mock"
+os.environ["TTS_PROVIDER"] = "mock"
 
 
 @pytest.fixture(autouse=True)
