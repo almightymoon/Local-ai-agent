@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 
 export default function useVoiceSession(conversationId, onFinal) {
+  const [error, setError] = useState(null);
   const wsRef = useRef(null);
   const [state, setState] = useState("idle");
   const [session, setSession] = useState(null);
@@ -45,6 +46,9 @@ export default function useVoiceSession(conversationId, onFinal) {
           // keep partials as a string for simple placeholder display
           setPartials(msg.data.text || "");
         }
+        if (msg.event === "error") {
+          setError(msg.data?.message || "Voice error");
+        }
         if (msg.event === "stt.final") {
           // final transcription arrived
           const finalText = msg.data?.text || "";
@@ -76,6 +80,7 @@ export default function useVoiceSession(conversationId, onFinal) {
     };
       ws.onclose = () => setState("idle");
       ws.onerror = () => setState("error");
+      ws.onclose = () => setState("idle");
       return () => {
         try {
           ws.close();

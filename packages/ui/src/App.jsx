@@ -4,6 +4,7 @@ import { Icon } from "./icons";
 import "./styles.css";
 import useVoiceSession from "./voice/useVoiceSession";
 import VoiceButton from "./voice/VoiceButton";
+import VoiceToast from "./voice/VoiceToast";
 
 const starters = [
   {
@@ -187,6 +188,7 @@ export default function App() {
     setDraft((d) => (d ? d + " " + finalText : finalText));
     setVoiceFinalPending(false);
   });
+  const [voiceError, setVoiceError] = useState(null);
   const pending = active.messages.findLast(
     (m) => m.action && !m.decided && m.action.expires * 1000 > Date.now(),
   );
@@ -978,6 +980,7 @@ export default function App() {
                         }
                       }}
                     />
+                    <VoiceToast message={voiceError} onClose={() => setVoiceError(null)} />
                     {busy ? (
                       <button
                         type="button"
