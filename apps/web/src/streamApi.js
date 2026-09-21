@@ -1,5 +1,6 @@
-export async function streamChat(message, onChunk) {
-  const response = await fetch(`http://127.0.0.1:8000/api/chat/stream?message=${encodeURIComponent(message)}`);
+export async function streamChat(message, onChunk, { signal } = {}) {
+  const url = `http://127.0.0.1:8000/api/chat/stream?message=${encodeURIComponent(message)}`;
+  const response = await fetch(url, { signal });
 
   if (!response.ok) {
     throw new Error('Stream request failed');
@@ -9,9 +10,14 @@ export async function streamChat(message, onChunk) {
   const decoder = new TextDecoder();
 
   let buffer = '';
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      if (signal && signal.aborted) {
+        await reader.cancel();
+        break;
+      }
+      const { value, done } = await reader.read();
+      if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
     const parts = buffer.split('\n\n');
@@ -27,5 +33,8 @@ export async function streamChat(message, onChunk) {
         });
       }
     }
+    }
+  } finally {
+    try { await reader.releaseLock?.(); } catch (e) {}
   }
 }

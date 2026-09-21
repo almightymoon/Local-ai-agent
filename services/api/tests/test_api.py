@@ -1,193 +1,696 @@
-from pathlib import Path
-import sys
+import hashlib
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import URLError
-
+import pytest
 from fastapi.testclient import TestClient
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.main import app  # noqa: E402
+from app.main import app, SESSION_TOKEN, model_router
 from app.model_runtime import LocalModelRouter
+from app import store
+from app.tools import registry, filesystem, browser
 
-client = TestClient(app)
+client = TestClient(app, headers={"X-Agent-Token": SESSION_TOKEN})
 
 
-def test_health_route():
-    response = client.get('/health')
+def execute(name, args=None):
+    return client.post(
+        "/api/tool/execute", json={"tool_name": name, "arguments": args or {}}
+    ).json()
+
+
+def chat(message="Inspect this repository", history=None):
+    return client.post(
+        "/api/chat", json={"message": message, "history": history or []}
+    ).json()
+
+
+def stream_chunks(content="", calls=None):
+    yield {"message": {"content": content, "tool_calls": calls or []}}
+    yield {"done": True}
+
+
+def call(name, **args):
+    return {"function": {"name": name, "arguments": args}}
+
+
+def workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(filesystem, "WORKSPACE_ROOT", tmp_path)
+    monkeypatch.setattr(registry, "WORKSPACE_ROOT", tmp_path)
+
+
+def test_health_and_token():
+    assert client.get("/health").json()["ok"]
+    assert client.get("/api/session").json()["token"] == SESSION_TOKEN
+    assert TestClient(app).get("/api/tools").status_code == 401
+
+
+def test_host_and_origin_restrictions():
+    assert (
+        client.get(
+            "/api/session", headers={"Origin": "https://evil.example"}
+        ).status_code
+        == 403
+    )
+    assert client.get("/api/session", headers={"Origin": "null"}).status_code == 403
+    assert (
+        client.get("/api/session", headers={"Host": "evil.example"}).status_code == 400
+    )
+    response = client.options(
+        "/api/chat/stream",
+        headers={
+            "Origin": "localagent://app",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "X-Agent-Token,Content-Type",
+        },
+    )
     assert response.status_code == 200
-    assert response.json()['ok'] is True
+    assert response.headers["access-control-allow-origin"] == "localagent://app"
 
 
-def test_chat_route_accepts_message():
-    response = client.post('/api/chat', json={'message': 'List the repo files'})
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['response']
-    assert payload['tool_plan']
+def test_model_unavailable(monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise URLError("refused")
+
+    monkeypatch.setattr("app.model_runtime.request.urlopen", fail)
+    assert not LocalModelRouter().status().available
+    result = chat()
+    assert any(e["event"] == "error" for e in result["events"])
+    assert result["tool_plan"] == []
 
 
-def test_local_model_router_marks_unreachable_provider_unavailable(monkeypatch):
-    def raise_url_error(_url, *_args, **_kwargs):
-        raise URLError('connection refused')
-
-    monkeypatch.setattr('app.model_runtime.request.urlopen', raise_url_error)
-
-    router = LocalModelRouter()
-    status = router.status()
-
-    assert status.provider == 'ollama'
-    assert status.available is False
-    assert 'reachable' in status.notes.lower() or 'not available' in status.notes.lower()
-
-
-def test_workspace_file_listing_tool_reads_repo_tree():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'list_workspace_files',
-        'arguments': {'path': '.'}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['status'] == 'ready'
-    assert payload['result']['items']
-    assert 'README.md' in payload['result']['items']
+def test_read_tools():
+    assert "README.md" in execute("list_workspace_files")["result"]["items"]
+    read = execute("read_file", {"path": "README.md", "max_lines": 20})
+    assert read["status"] == "ready"
+    assert "# Zentra" in read["result"]["content"]
+    assert len(read["result"]["sha256"]) == 64
+    assert execute("inspect_project_structure")["result"]["file_count"] > 0
+    assert (
+        execute("search_workspace_files", {"query": "Local AI Agent"})["result"][
+            "count"
+        ]
+        > 0
+    )
+    assert execute("generate_project_plan", {"goal": "Improve the app"})["result"][
+        "steps"
+    ]
 
 
-def test_read_file_tool_reads_repo_file():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'read_file',
-        'arguments': {'path': 'README.md', 'max_lines': 20}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['status'] == 'ready'
-    assert '# Local AI Agent' in payload['result']['content']
+def test_unknown_and_unimplemented_tools():
+    assert execute("invented_tool")["status"] == "error"
+    for environment in ("dev", "prod"):
+        result = execute("terraform_apply", {"environment": environment})
+        assert result["status"] == "not_implemented"
+        assert not result["requires_approval"]
 
 
-def test_inspect_project_structure_tool_reports_repo_summary():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'inspect_project_structure',
-        'arguments': {'path': '.'}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['status'] == 'ready'
-    assert payload['result']['file_count'] > 0
-    assert 'README.md' in payload['result']['files']
-    assert 'README.md' in payload['result']['key_files']
-
-
-def test_search_workspace_files_tool_finds_repo_text():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'search_workspace_files',
-        'arguments': {'path': '.', 'query': 'Local AI Agent'}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['status'] == 'ready'
-    assert payload['result']['count'] > 0
-    assert any(match['file'] == 'README.md' for match in payload['result']['matches'])
-
-
-def test_generate_project_plan_tool_creates_actionable_plan():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'generate_project_plan',
-        'arguments': {'path': '.', 'goal': 'Ship a working local AI agent prototype'}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['status'] == 'ready'
-    assert payload['result']['goal']
-    assert payload['result']['steps']
-    assert any('validate' in step.lower() or 'verify' in step.lower() for step in payload['result']['steps'])
-
-
-def test_browser_navigate_tool_reads_web_page():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'browser_navigate',
-        'arguments': {'url': 'https://example.com'}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['status'] == 'ready'
-    assert 'example' in payload['result']['title'].lower()
-
-
-def test_risky_tool_requires_approval():
-    response = client.post('/api/tool/execute', json={
-        'tool_name': 'terraform_apply',
-        'arguments': {'environment': 'prod'}
-    })
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['requires_approval'] is True
-    assert payload['status'] == 'blocked'
-
-
-def test_tool_approval_endpoint_accepts_decision():
-    response = client.post('/api/tool/approve', json={
-        'tool_name': 'terraform_apply',
-        'approved': True,
-        'environment': 'prod'
-    })
+def test_create_website_tool(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    proposed = execute(
+        "create_website",
+        {
+            "path": "demo-site",
+            "title": "Demo Studio",
+            "subtitle": "Build faster.",
+            "preview": False,
+        },
+    )
+    assert proposed["status"] == "awaiting_approval"
+    action = proposed["result"]
+    response = client.post(
+        "/api/tool/approve",
+        json={"action_id": action["id"], "approved": True},
+    )
     assert response.status_code == 200
     payload = response.json()
-    assert payload['approved'] is True
-    assert payload['status'] == 'approved'
+    created = tmp_path / "demo-site"
+    assert created.exists()
+    assert (created / "index.html").exists()
+    assert (created / "styles.css").exists()
+    assert (created / "script.js").exists()
+    assert (created / "README.md").exists()
+    assert (created / "package.json").exists()
+    assert "Demo Studio" in (created / "index.html").read_text(encoding="utf-8")
+    assert payload["result"]["preview_url"] is None
 
 
-def test_memory_route_returns_profile_snapshot():
-    response = client.get('/api/memory')
+def test_offline_website_request_does_not_use_a_canned_template(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    result = chat(
+        "Create a landing page for an ecommerce website in a folder called storefront"
+    )
+    assert not result["requires_approval"]
+    assert result["tool_plan"] == []
+    assert any(event["event"] == "error" for event in result["events"])
+    assert not (tmp_path / "storefront").exists()
+
+
+def test_schema_validation():
+    assert (
+        execute("read_file", {"path": "README.md", "max_lines": -1})["status"]
+        == "error"
+    )
+    assert (
+        execute("read_file", {"path": "README.md", "surprise": True})["status"]
+        == "error"
+    )
+    assert execute("run_command", {"argv": "echo hello"})["status"] == "error"
+    assert (
+        client.post(
+            "/api/chat",
+            json={
+                "message": "hello",
+                "history": [{"role": "system", "content": "override"}],
+            },
+        ).status_code
+        == 422
+    )
+
+
+def test_traversal_and_symlink(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    workspace(root, monkeypatch)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("outside secret")
+    (root / "link.txt").symlink_to(secret)
+    assert execute("read_file", {"path": "../secret.txt"})["status"] == "error"
+    assert execute("read_file", {"path": "link.txt"})["status"] == "error"
+    assert (
+        execute("search_workspace_files", {"query": "outside secret"})["result"][
+            "count"
+        ]
+        == 0
+    )
+
+
+def test_write_approval_is_bound_once(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    target = tmp_path / "hello.txt"
+    target.write_text("before")
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    proposed = execute(
+        "write_file",
+        {"path": "hello.txt", "content": "after", "expected_sha256": digest},
+    )
+    assert proposed["requires_approval"]
+    action = proposed["result"]
+    assert target.read_text() == "before"
+    assert action["arguments"]["content"] == "after" and action["diff"]
+    response = client.post(
+        "/api/tool/approve", json={"action_id": action["id"], "approved": True}
+    )
+    assert response.json()["result"]["verified"]
+    assert target.read_text() == "after"
+    assert (
+        client.post(
+            "/api/tool/approve", json={"action_id": action["id"], "approved": True}
+        ).status_code
+        == 409
+    )
+    assert store.get_action(action["id"])["result"]["status"] == "ready"
+
+
+def test_changed_file_rejects_approval(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    target = tmp_path / "new.txt"
+    action = execute(
+        "write_file",
+        {"path": "new.txt", "content": "proposed", "expected_sha256": "new"},
+    )["result"]
+    target.write_text("user edit")
+    response = client.post(
+        "/api/tool/approve", json={"action_id": action["id"], "approved": True}
+    ).json()
+    assert response["status"] == "error"
+    assert target.read_text() == "user edit"
+
+
+def test_rejection_and_expiry(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    action = execute(
+        "write_file", {"path": "new.txt", "content": "no", "expected_sha256": "new"}
+    )["result"]
+    assert (
+        client.post(
+            "/api/tool/approve", json={"action_id": action["id"], "approved": False}
+        ).json()["status"]
+        == "rejected"
+    )
+    assert not (tmp_path / "new.txt").exists()
+    expired = store.create_action("write_file", {}, tmp_path, "write")
+    with store.connection() as db:
+        db.execute(
+            "UPDATE actions SET expires=? WHERE id=?", (time.time() - 1, expired["id"])
+        )
+    assert (
+        client.post(
+            "/api/tool/approve", json={"action_id": expired["id"], "approved": True}
+        ).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            "/api/tool/approve", json={"tool_name": "write_file", "approved": True}
+        ).status_code
+        == 422
+    )
+
+
+def test_concurrent_approval_claim(tmp_path):
+    action = store.create_action("run_command", {}, tmp_path, "critical")
+
+    def claim():
+        try:
+            store.claim_action(action["id"], True)
+            return True
+        except ValueError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(lambda _: claim(), range(2))).count(True) == 1
+
+
+def test_real_model_selected_loop_and_memory(monkeypatch):
+    store.save_memory("package_manager", "pnpm")
+    observed = []
+
+    def provider(messages, tools):
+        observed.append(json.loads(json.dumps(messages)))
+        assert any(t["function"]["name"] == "read_file" for t in tools)
+        if len(observed) == 1:
+            yield from stream_chunks(
+                calls=[call("read_file", path="README.md", max_lines=5)]
+            )
+        else:
+            yield from stream_chunks("This project is a local agent.")
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    result = chat("Explain this", [{"role": "user", "content": "Earlier context"}])
+    assert result["tool_plan"] == ["read_file"]
+    assert result["response"] == "This project is a local agent."
+    assert "pnpm" in observed[0][0]["content"]
+    assert observed[0][1]["content"] == "Earlier context"
+    assert observed[1][-1]["role"] == "tool"
+
+
+def test_approval_resumes_remaining_calls(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    turns = []
+
+    def provider(messages, _tools):
+        turns.append(json.loads(json.dumps(messages)))
+        if len(turns) == 1:
+            yield from stream_chunks(
+                calls=[
+                    call(
+                        "write_file",
+                        path="new.txt",
+                        content="hello",
+                        expected_sha256="new",
+                    ),
+                    call("read_file", path="new.txt"),
+                ]
+            )
+        else:
+            yield from stream_chunks("Verified the edit.")
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    result = chat("Write hello")
+    action = next(e["data"] for e in result["events"] if e["event"] == "approval")
+    response = client.post(
+        "/api/chat/resume", json={"action_id": action["id"], "approved": True}
+    )
+    assert "Verified the edit." in response.text
+    assert (tmp_path / "new.txt").read_text() == "hello"
+    assert turns[-1][-1]["tool_name"] == "read_file"
+    assert (
+        client.post(
+            "/api/chat/resume", json={"action_id": action["id"], "approved": True}
+        ).status_code
+        == 409
+    )
+
+
+def test_step_budget(monkeypatch):
+    monkeypatch.setattr(
+        model_router,
+        "stream_chat",
+        lambda *_: stream_chunks(calls=[call("list_workspace_files")]),
+    )
+    result = chat()
+    assert len(result["tool_plan"]) == 12
+    assert any("12-step" in e["data"].get("message", "") for e in result["events"])
+
+
+def test_stream_preserves_whitespace(monkeypatch):
+    def provider(*_args):
+        yield {"message": {"content": "first\n"}}
+        yield {"message": {"content": "  second"}}
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    response = client.post("/api/chat/stream", json={"message": "hello"})
+    data = [
+        json.loads(line[6:])
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert "".join(d.get("text", "") for d in data) == "first\n  second"
+    assert "event: done" in response.text
+
+
+def test_ollama_stream_uses_chat(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def __iter__(self):
+            return iter([b'{"message":{"content":"hello"}}\n', b'{"done":true}\n'])
+
+    seen = []
+
+    def open_request(req, **_kwargs):
+        seen.append(req)
+        return Response()
+
+    monkeypatch.setattr("app.model_runtime.request.urlopen", open_request)
+    assert (
+        list(LocalModelRouter().stream_chat([{"role": "user", "content": "Hi"}], []))[
+            0
+        ]["message"]["content"]
+        == "hello"
+    )
+    assert seen[0].full_url.endswith("/api/chat")
+    assert json.loads(seen[0].data)["stream"] is True
+
+
+def test_chat_ask_mode_returns_plain_response(monkeypatch):
+    # Provider that returns a simple message without tool calls
+    def provider(messages, _tools):
+        yield {"message": {"content": "Just an answer."}}
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    response = client.post(
+        "/api/chat",
+        json={"message": "hello", "history": [], "mode": "ask"},
+    )
     assert response.status_code == 200
     payload = response.json()
-    assert payload['profile']['preferred_package_manager']
+    assert payload["response"] == "Just an answer."
+    assert payload["tool_plan"] == []
+    assert payload["requires_approval"] is False
 
 
-def test_skills_route_lists_verified_skills():
-    response = client.get('/api/skills')
+def test_chat_plan_mode_requests_plan(monkeypatch):
+    # Simulate a planner response
+    def provider(messages, _tools):
+        # The system role should be present for plan mode
+        assert any(m.get("role") == "system" for m in messages)
+        yield {"message": {"content": "1. Do A\n2. Do B"}}
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    response = client.post(
+        "/api/chat",
+        json={"message": "Plan how to refactor", "history": [], "mode": "plan"},
+    )
     assert response.status_code == 200
     payload = response.json()
-    assert payload['skills']
-    assert any(skill['state'] == 'verified' for skill in payload['skills'])
+    assert "1. Do A" in payload["response"]
+    assert payload["tool_plan"] == []
+    assert payload["requires_approval"] is False
 
 
-def test_tool_registry_lists_available_tools():
-    response = client.get('/api/tools')
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload['tools']
-    assert any(tool['name'] == 'terraform_apply' for tool in payload['tools'])
+def test_memory_and_skills():
+    assert client.get("/api/memory").json()["profile"] == {}
+    assert (
+        client.post(
+            "/api/memory/save", json={"key": "manager", "value": "pnpm"}
+        ).status_code
+        == 200
+    )
+    assert client.get("/api/memory/manager").json()["value"] == "pnpm"
+    assert client.get("/api/memory/missing").status_code == 404
+    assert isinstance(client.get("/api/skills").json()["skills"], list)
+    assert any(
+        t["name"] == "write_file" for t in client.get("/api/tools").json()["tools"]
+    )
 
 
-def test_memory_write_and_read_round_trip():
-    write_response = client.post('/api/memory/save', json={
-        'key': 'project_name',
-        'value': 'local-ai-agent'
-    })
-    assert write_response.status_code == 200
-    read_response = client.get('/api/memory/project_name')
-    assert read_response.status_code == 200
-    payload = read_response.json()
-    assert payload['value'] == 'local-ai-agent'
+def test_browser_blocks_private_dns(monkeypatch):
+    monkeypatch.setattr(
+        browser.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", 80))],
+    )
+    assert (
+        execute("browser_navigate", {"url": "http://internal.example"})["status"]
+        == "error"
+    )
+    with pytest.raises(ValueError):
+        browser.fetch_webpage_title("file:///etc/passwd")
 
 
-def test_chat_reports_model_provider_status():
-    response = client.post('/api/chat', json={'message': 'What model are you using?'})
-    assert response.status_code == 200
-    payload = response.json()
-    assert 'provider' in payload
-    assert 'model' in payload
+def test_browser_fetch_is_offline_and_redirect_checked(monkeypatch):
+    seen = []
+
+    class Socket:
+        def close(self):
+            pass
+
+    class Response:
+        status = 200
+
+        def getheader(self, name, default=None):
+            return "text/html" if name == "Content-Type" else default
+
+        def read(self, _limit):
+            return b"<title>Example</title><p>Public page</p>"
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def request(self, *_args, **_kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        browser.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 80))],
+    )
+    monkeypatch.setattr(
+        browser.socket,
+        "create_connection",
+        lambda target, **_kwargs: seen.append(target) or Socket(),
+    )
+    monkeypatch.setattr(browser.http.client, "HTTPConnection", Connection)
+    result = execute("browser_navigate", {"url": "http://example.com"})
+    assert result["result"]["title"] == "Example"
+    assert seen == [("93.184.216.34", 80)]
+    Response.status = 302
+    Response.getheader = (
+        lambda self, name, default=None: "http://127.0.0.1/"
+        if name == "Location"
+        else default
+    )
+    monkeypatch.setattr(
+        browser.socket,
+        "getaddrinfo",
+        lambda host, *_args, **_kwargs: [
+            (2, 1, 6, "", (host if host == "127.0.0.1" else "93.184.216.34", 80))
+        ],
+    )
+    assert (
+        execute("browser_navigate", {"url": "http://example.com"})["status"] == "error"
+    )
 
 
-def test_model_status_route_reports_provider_health():
-    response = client.get('/api/model/status')
-    assert response.status_code == 200
-    payload = response.json()
-    assert 'provider' in payload
-    assert 'available' in payload
+def test_approved_command_records_exit(tmp_path, monkeypatch):
+    import sys
+
+    workspace(tmp_path, monkeypatch)
+    action = execute(
+        "run_command", {"argv": [sys.executable, "-c", 'print("verified")']}
+    )["result"]
+    result = client.post(
+        "/api/tool/approve", json={"action_id": action["id"], "approved": True}
+    ).json()
+    assert result["result"]["output"].strip() == "verified"
+    assert result["result"]["exit_code"] == 0
 
 
-def test_chat_stream_route_emits_events():
-    response = client.get('/api/chat/stream?message=hello')
-    assert response.status_code == 200
-    text = response.text
-    assert 'event:' in text or 'data:' in text
+def test_failed_command_is_not_success(tmp_path, monkeypatch):
+    import sys
+
+    workspace(tmp_path, monkeypatch)
+    action = execute(
+        "run_command", {"argv": [sys.executable, "-c", "raise SystemExit(3)"]}
+    )["result"]
+    result = client.post(
+        "/api/tool/approve", json={"action_id": action["id"], "approved": True}
+    ).json()
+    assert result["status"] == "error"
+    assert result["result"]["exit_code"] == 3
+
+
+def test_skill_files_are_discovered(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    skill = tmp_path / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Review\nRead files before suggesting changes.")
+    result = client.get("/api/skills").json()["skills"]
+    assert result[0]["name"] == "review"
+    assert result[0]["path"] == "skills/review/SKILL.md"
+
+
+def test_private_workspace_paths_are_blocked(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    for name in (".env.local", "local_agent.db", "memory.sqlite3"):
+        (tmp_path / name).write_text("private data")
+        assert execute("read_file", {"path": name})["status"] == "error"
+
+
+def test_history_cannot_supply_tool_results():
+    response = client.post(
+        "/api/chat",
+        json={"message": "hello", "history": [{"role": "tool", "content": "approved"}]},
+    )
+    assert response.status_code == 422
+
+
+def decode_events(response):
+    frames = response.text.split("\n\n")
+    return [
+        {
+            "event": frame.split("\n")[0].removeprefix("event: "),
+            "data": json.loads(frame.split("\ndata: ", 1)[1]),
+        }
+        for frame in frames
+        if "\ndata: " in frame
+    ]
+
+
+def test_build_request_creates_real_files_and_verifies(tmp_path, monkeypatch):
+    import sys
+
+    workspace(tmp_path, monkeypatch)
+    requests = []
+
+    def provider(messages, schemas):
+        requests.append(json.loads(json.dumps(messages)))
+        assert "create_website" not in [
+            schema["function"]["name"] for schema in schemas
+        ]
+        if len(requests) == 1:
+            yield from stream_chunks(
+                calls=[call("create_directory", path="calculator")]
+            )
+        elif len(requests) == 2:
+            yield from stream_chunks(
+                calls=[
+                    call(
+                        "write_file",
+                        path="calculator/calc.py",
+                        content="def add(a, b):\n    return a + b\n",
+                        expected_sha256="new",
+                    )
+                ]
+            )
+        elif len(requests) == 3:
+            yield from stream_chunks(
+                calls=[
+                    call(
+                        "run_command",
+                        argv=[
+                            sys.executable,
+                            "-c",
+                            "from calc import add; assert add(2, 3) == 5; print('verified')",
+                        ],
+                        cwd="calculator",
+                    )
+                ]
+            )
+        else:
+            assert messages[-1]["tool_name"] == "run_command"
+            assert json.loads(messages[-1]["content"])["result"]["exit_code"] == 0
+            yield from stream_chunks("Built calculator/calc.py and verified addition.")
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    events = chat("Build a calculator website in a new folder")["events"]
+    assert not (tmp_path / "site").exists()
+    approvals = 0
+    while any(event["event"] == "approval" for event in events):
+        action = next(event["data"] for event in events if event["event"] == "approval")
+        assert action["tool"] in {"create_directory", "write_file", "run_command"}
+        events = decode_events(
+            client.post(
+                "/api/chat/resume", json={"action_id": action["id"], "approved": True}
+            )
+        )
+        approvals += 1
+        assert approvals <= 3
+    assert approvals == 3
+    assert (tmp_path / "calculator/calc.py").read_text().startswith("def add")
+    assert any(
+        event["data"].get("text") == "Built calculator/calc.py and verified addition."
+        for event in events
+    )
+    assert len(requests) == 4
+
+
+@pytest.mark.parametrize("mode", ["ask", "plan"])
+def test_non_agent_modes_do_not_offer_tools(monkeypatch, mode):
+    def provider(messages, tools):
+        assert tools == []
+        assert mode.title() + " mode" in messages[0]["content"]
+        yield from stream_chunks("Here is the response.")
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    response = client.post(
+        "/api/chat", json={"message": "Build a website", "mode": mode}
+    ).json()
+    assert response["response"] == "Here is the response."
+    assert response["tool_plan"] == []
+    assert not response["requires_approval"]
+
+
+def test_non_agent_error_finishes_stream():
+    response = client.post("/api/chat/stream", json={"message": "hello", "mode": "ask"})
+    events = decode_events(response)
+    assert events[-1] == {"event": "done", "data": {"status": "stopped"}}
+    assert any(event["event"] == "error" for event in events)
+
+
+def test_rejected_build_continues_without_writing(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    count = 0
+
+    def provider(messages, _tools):
+        nonlocal count
+        count += 1
+        if count == 1:
+            yield from stream_chunks(
+                calls=[call("create_directory", path="new-project")]
+            )
+        else:
+            assert json.loads(messages[-1]["content"])["status"] == "rejected"
+            yield from stream_chunks("The action was rejected; no files were created.")
+
+    monkeypatch.setattr(model_router, "stream_chat", provider)
+    events = chat("Build a website")["events"]
+    action = next(event["data"] for event in events if event["event"] == "approval")
+    response = client.post(
+        "/api/chat/resume", json={"action_id": action["id"], "approved": False}
+    )
+    assert "no files were created" in response.text
+    assert not (tmp_path / "new-project").exists()

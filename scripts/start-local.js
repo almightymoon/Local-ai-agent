@@ -1,22 +1,46 @@
-const { spawn } = require('child_process');
-const fs = require('fs');
-const http = require('http');
-const path = require('path');
+const { spawn } = require("child_process");
+const http = require("http");
+const path = require("path");
 
-const projectRoot = path.resolve(__dirname, '..');
-const desktopDistIndex = path.join(projectRoot, 'apps', 'desktop', 'dist', 'index.html');
+// Resolve the script path robustly so the script works when invoked from any cwd.
+const invokedScript = process.argv[1] || __filename;
+const scriptPath = path.isAbsolute(invokedScript)
+  ? invokedScript
+  : path.resolve(process.cwd(), invokedScript);
+const scriptDir = path.dirname(scriptPath);
+const projectRoot = path.resolve(scriptDir, "..");
 const pythonExecutable = process.env.VIRTUAL_ENV
-  ? path.join(process.env.VIRTUAL_ENV, 'bin', 'python')
-  : path.join(projectRoot, '.venv', 'bin', 'python');
+  ? path.join(process.env.VIRTUAL_ENV, "bin", "python")
+  : path.join(projectRoot, ".venv", "bin", "python");
 
 function checkHealth(url) {
   return new Promise((resolve) => {
     const req = http.get(url, (res) => {
-      res.resume();
-      resolve(res.statusCode >= 200 && res.statusCode < 500);
+      let body = "";
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          resolve(
+            data.ok &&
+              (data.app_name === "Zentra" || data.app_name === "Local AI Agent") &&
+              data.version === "0.2.0"
+              ? "ready"
+              : "incompatible",
+          );
+        } catch {
+          resolve("incompatible");
+        }
+      });
     });
 
-    req.on('error', () => resolve(false));
+    req.setTimeout(2000, () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on("error", () => resolve(false));
   });
 }
 
@@ -26,7 +50,7 @@ function waitForHealth(url, timeoutMs = 30000) {
 
     const attempt = async () => {
       const alive = await checkHealth(url);
-      if (alive) {
+      if (alive === "ready") {
         resolve();
         return;
       }
@@ -42,53 +66,77 @@ function waitForHealth(url, timeoutMs = 30000) {
   });
 }
 
+function stopPortListeners(port) {
+  const { spawnSync } = require("child_process");
+  const result = spawnSync("lsof", ["-ti", `tcp:${port}`], {
+    encoding: "utf-8",
+  });
+  const pids = (result.stdout || "")
+    .split(/\s+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  for (const pid of pids) {
+    try {
+      process.kill(Number(pid), "SIGTERM");
+    } catch {
+      // Ignore harmless PID cleanup failures.
+    }
+  }
+}
+
 function startProcess(command, args, options = {}) {
   return spawn(command, args, {
     cwd: projectRoot,
-    stdio: 'inherit',
+    stdio: "inherit",
     shell: false,
     env: { ...process.env, ...options.env },
   });
 }
 
 function ensureDesktopBundle() {
-  if (fs.existsSync(desktopDistIndex)) {
-    return Promise.resolve();
-  }
-
   return new Promise((resolve, reject) => {
-    const build = startProcess('npm', ['--workspace', 'apps/desktop', 'run', 'build']);
-    build.on('exit', (code) => {
+    const build = startProcess("npm", [
+      "--workspace",
+      "apps/desktop",
+      "run",
+      "build",
+    ]);
+    build.on("exit", (code) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error('Desktop build failed during startup.'));
+        reject(new Error("Desktop build failed during startup."));
       }
     });
-    build.on('error', (error) => reject(error));
+    build.on("error", (error) => reject(error));
   });
 }
 
 async function main() {
   let backend = null;
   await ensureDesktopBundle();
-  const backendReady = await checkHealth('http://127.0.0.1:8000/health');
+  const backendReady = await checkHealth("http://127.0.0.1:8000/health");
 
-  if (!backendReady) {
+  if (backendReady === "incompatible") {
+    stopPortListeners(8000);
+    console.log("Detected stale backend on port 8000. Restarting with the current app...");
+  }
+  if (!backendReady || backendReady === "incompatible") {
     backend = startProcess(pythonExecutable, [
-      '-m',
-      'uvicorn',
-      'app.main:app',
-      '--app-dir',
-      'services/api',
-      '--host',
-      '127.0.0.1',
-      '--port',
-      '8000',
+      "-m",
+      "uvicorn",
+      "app.main:app",
+      "--app-dir",
+      "services/api",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8000",
     ]);
 
     try {
-      await waitForHealth('http://127.0.0.1:8000/health');
+      await waitForHealth("http://127.0.0.1:8000/health");
     } catch (error) {
       console.error(error.message);
       if (backend) backend.kill();
@@ -96,27 +144,35 @@ async function main() {
     }
   }
 
-  console.log('Backend ready. Launching desktop app...');
+  console.log("Backend ready. Launching desktop app...");
 
-  const desktop = startProcess('npm', ['--workspace', 'apps/desktop', 'run', 'start']);
+  const desktop = startProcess("npm", [
+    "--workspace",
+    "apps/desktop",
+    "run",
+    "start",
+  ]);
 
-  desktop.on('exit', (code) => {
+  desktop.on("exit", (code) => {
     if (backend) backend.kill();
     process.exit(code ?? 0);
   });
 
   if (backend) {
-    backend.on('exit', (code) => {
+    backend.on("exit", (code) => {
       desktop.kill();
       process.exit(code ?? 0);
     });
   }
 
-  process.on('SIGINT', () => {
+  process.on("SIGINT", () => {
     desktop.kill();
     if (backend) backend.kill();
     process.exit(0);
   });
 }
 
-main();
+main().catch((error) => {
+  console.error(error.message);
+  process.exit(1);
+});

@@ -1,7 +1,7 @@
 export const appConstants = {
-  appName: 'Local AI Agent',
+  appName: 'Zentra',
   telemetry: {
-    serviceName: 'local-ai-agent'
+    serviceName: 'zentra'
   }
 };
 

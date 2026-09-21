@@ -8,3 +8,15 @@ __pycache__
 dist
 build
 .vite
+
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+.agent-data/
+logs/
+generated-skills/
+.env.*
+!.env.example
+.test-deps/
+.ruff_cache/

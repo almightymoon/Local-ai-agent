@@ -1,0 +1,27 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: services/api/requirements*.txt
+      - run: npm ci
+      - run: pip install -r services/api/requirements-dev.txt
+      - run: python -m ruff check services/api --select E9,F63,F7,F82
+      - run: node --check apps/desktop/main.js && node --check apps/desktop/preload.cjs && node --check scripts/start-local.js
+      - run: python -m pytest services/api/tests -q
+      - run: npm run build
+      - run: npm run build:desktop

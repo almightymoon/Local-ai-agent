@@ -1,0 +1,10 @@
+{
+  "name": "site",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "python3 -m http.server 8000 --directory .",
+    "preview": "python3 -m http.server 8000 --directory .",
+    "build": "echo 'Static site ready'"
+  }
+}

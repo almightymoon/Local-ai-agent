@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+/*
+ A tiny wrapper that launches the project's start-local.js from the repository
+ root regardless of the current working directory. This is helpful for shells
+ or scripts that cd into subfolders before running the helper.
+*/
+const { spawn } = require('child_process');
+const path = require('path');
+const repoRoot = path.resolve(__dirname);
+const script = path.join(repoRoot, 'scripts', 'start-local.js');
+const child = spawn(process.execPath, [script], {
+  cwd: repoRoot,
+  stdio: 'inherit',
+});
+child.on('exit', (code) => process.exit(code ?? 0));

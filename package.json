@@ -1,5 +1,5 @@
 {
-  "name": "local-ai-agent",
+  "name": "zentra",
   "private": true,
   "version": "0.1.0",
   "workspaces": [
@@ -8,9 +8,9 @@
     "packages/shared"
   ],
   "scripts": {
-    "dev:web": "npm --workspace apps/web run dev -- --host 0.0.0.0",
+    "dev:web": "npm --workspace apps/web run dev -- --host 127.0.0.1",
     "build": "npm --workspace apps/web run build",
-    "dev:api": "python3 -m uvicorn app.main:app --app-dir services/api --host 0.0.0.0 --port 8000 --reload",
+    "dev:api": "python3 -m uvicorn app.main:app --app-dir services/api --host 127.0.0.1 --port 8000 --reload",
     "dev:desktop": "npm --workspace apps/desktop run dev",
     "build:desktop": "npm --workspace apps/desktop run build",
     "start:desktop": "npm --workspace apps/desktop run start",

@@ -387,6 +387,16 @@ textarea {
   resize: vertical;
 }
 
+/* Messages list and sessions row */
+.sessions-row { display:flex; justify-content:flex-end; margin-bottom:8px; }
+.empty-state { color:var(--muted); padding:12px; }
+.messages-list { display:flex; flex-direction:column; gap:10px; max-height:320px; overflow:auto; padding:6px 0; }
+.message { padding:10px 14px; border-radius:12px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.02); }
+.message.user { align-self:flex-end; background:linear-gradient(180deg, rgba(29,78,216,0.12), rgba(29,78,216,0.06)); }
+.message.assistant { align-self:flex-start; }
+.message-role { font-size:0.75rem; color:var(--muted); margin-bottom:6px; }
+.message-text { white-space:pre-wrap; }
+
 @media (max-width: 1000px) {
   .workspace-main {
     grid-template-columns: 1fr;
