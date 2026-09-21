@@ -35,6 +35,9 @@ class VoiceManager:
         self.lock = threading.Lock()
         # per-session audio buffers (list of bytes)
         self.buffers: Dict[str, bytearray] = {}
+        # background partial worker control
+        self._worker_events: Dict[str, threading.Event] = {}
+        self._worker_threads: Dict[str, threading.Thread] = {}
 
     def create_session(self, conversation_id: str) -> VoiceSession:
         with self.lock:
@@ -52,6 +55,16 @@ class VoiceManager:
             try:
                 self.sessions.pop(sid, None)
                 self.buffers.pop(sid, None)
+                # stop any worker
+                ev = self._worker_events.pop(sid, None)
+                if ev:
+                    ev.set()
+                thr = self._worker_threads.pop(sid, None)
+                if thr and thr.is_alive():
+                    try:
+                        thr.join(timeout=0.1)
+                    except Exception:
+                        pass
             except KeyError:
                 pass
 
@@ -93,6 +106,55 @@ class VoiceManager:
         data = bytes(buf)
         self.buffers[sid] = bytearray()
         return data
+
+    def peek_session_audio(self, sid: str) -> bytes:
+        """Return a snapshot copy of the current buffer without clearing it."""
+        buf = self.buffers.get(sid)
+        if not buf:
+            return b""
+        return bytes(buf)
+
+    def start_partial_worker(self, sid: str, stt_callable, partial_callback, interval: float = 2.0, min_bytes: int = 16000):
+        """Start a background thread that periodically snapshots audio and calls stt_callable, sending partials via partial_callback(sid, text)."""
+        if sid in self._worker_threads:
+            return
+        stop_ev = threading.Event()
+        self._worker_events[sid] = stop_ev
+
+        def _worker():
+            last_len = 0
+            while not stop_ev.is_set():
+                try:
+                    snapshot = self.peek_session_audio(sid)
+                    if snapshot and len(snapshot) >= min_bytes and len(snapshot) > last_len:
+                        try:
+                            text = stt_callable(snapshot)
+                        except Exception:
+                            text = None
+                        if text:
+                            try:
+                                partial_callback(sid, text)
+                            except Exception:
+                                pass
+                        last_len = len(snapshot)
+                except Exception:
+                    pass
+                stop_ev.wait(interval)
+
+        thr = threading.Thread(target=_worker, daemon=True)
+        self._worker_threads[sid] = thr
+        thr.start()
+
+    def stop_partial_worker(self, sid: str):
+        ev = self._worker_events.pop(sid, None)
+        if ev:
+            ev.set()
+        thr = self._worker_threads.pop(sid, None)
+        if thr and thr.is_alive():
+            try:
+                thr.join(timeout=0.1)
+            except Exception:
+                pass
 
     def submit_audio_for_transcription(self, sid: str, stt_callable, audio_bytes: bytes, callback=None):
         """Run transcription in background thread and call callback with result."""

@@ -67,21 +67,63 @@ async def ws_voice_session(websocket: WebSocket, conversation_id: str):
                     manager.start_listening(session.id)
                     _log(f"ws:{session.id} voice.start")
                     await websocket.send_json({"event": "voice.state", "data": {"state": session.state}})
+                    # start partial worker to send stt.partial periodically
+                    try:
+                        def _on_partial(sid, text):
+                            try:
+                                loop = asyncio.get_running_loop()
+                                loop.call_soon_threadsafe(asyncio.create_task, websocket.send_json({"event": "stt.partial", "data": {"text": text}}))
+                            except Exception:
+                                pass
+
+                        manager.start_partial_worker(session.id, _stt.transcribe, _on_partial)
+                    except Exception as e:
+                        _log(f"start partial worker failed: {e}")
                 elif event == "voice.stop":
                     manager.stop_listening(session.id)
                     _log(f"ws:{session.id} voice.stop")
                     await websocket.send_json({"event": "voice.state", "data": {"state": session.state}})
                     # try to get buffered audio and run transcription in background
                     try:
+                        # stop periodic partial worker first
+                        manager.stop_partial_worker(session.id)
                         audio = manager.collect_session_audio(session.id)
                         if audio:
-                            def _on_transcribed(sid, text):
-                                try:
-                                    websocket.send_json({"event": "stt.final", "data": {"text": text}})
-                                except Exception:
-                                    pass
+                            # run provider generator in a background thread and forward partials/final
+                            loop = asyncio.get_running_loop()
 
-                            manager.submit_audio_for_transcription(session.id, _stt.transcribe, audio, callback=_on_transcribed)
+                            def _worker():
+                                try:
+                                    for item in _stt.transcribe_stream([audio]):
+                                        if not isinstance(item, dict):
+                                            continue
+                                        if "partial" in item:
+                                            # schedule partial send on event loop
+                                            try:
+                                                loop.call_soon_threadsafe(asyncio.create_task, websocket.send_json({"event": "stt.partial", "data": {"text": item.get("partial", "")}}))
+                                            except Exception:
+                                                pass
+                                        if "final" in item:
+                                            final_text = item.get("final", "")
+                                            try:
+                                                # send final transcription
+                                                loop.call_soon_threadsafe(asyncio.create_task, websocket.send_json({"event": "stt.final", "data": {"text": final_text}}))
+                                            except Exception:
+                                                pass
+                                            # also forward to orchestrator synchronously and send assistant response
+                                            try:
+                                                from app.main import chat, ChatRequest
+
+                                                body = ChatRequest(message=final_text, history=[], mode="agent")
+                                                resp = chat(body)
+                                                loop.call_soon_threadsafe(asyncio.create_task, websocket.send_json({"event": "assistant.response", "data": {"response": resp}}))
+                                            except Exception as e:
+                                                _log(f"orchestrator error: {e}")
+                                except Exception as e:
+                                    _log(f"stt worker failed: {e}")
+
+                            t = threading.Thread(target=_worker, daemon=True)
+                            t.start()
                     except Exception as e:
                         _log(f"stt background submit failed: {e}")
                 elif event == "stt.final":
