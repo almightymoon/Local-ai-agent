@@ -107,6 +107,16 @@ def session():
     return JSONResponse({"token": SESSION_TOKEN}, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/ide/workspace")
+def ide_workspace():
+    return {
+        "root": str(registry.WORKSPACE_ROOT),
+        "protocol": 1,
+        "model": model_router.model,
+        "provider": model_router.provider,
+    }
+
+
 def stream(events):
     def encode():
         for event in events:

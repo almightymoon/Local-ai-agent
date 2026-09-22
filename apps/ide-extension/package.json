@@ -1,0 +1,18 @@
+{
+  "name": "zentra-agent", "displayName": "Zentra — Local Coding Agent", "publisher": "zentra-local",
+  "version": "0.1.0", "description": "Build with your local model: workspace tools, reviewed edits, and verification in VSCodium.",
+  "license": "MIT", "engines": {"vscode": "^1.90.0"}, "main": "./extension.cjs",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": {"untrustedWorkspaces": {"supported": false, "description": "The agent reads workspace files and can execute approved commands."}},
+  "contributes": {
+    "commands": [
+      {"command": "zentra.openAgent", "title": "Zentra: Open Local Agent"},
+      {"command": "zentra.sendSelection", "title": "Zentra: Add Selection to Agent"},
+      {"command": "zentra.showOutput", "title": "Zentra: Show Agent Output"}
+    ],
+    "keybindings": [{"command": "zentra.openAgent", "key": "ctrl+shift+l", "mac": "cmd+shift+l"}],
+    "menus": {"editor/context": [{"command": "zentra.sendSelection", "when": "editorHasSelection", "group": "zentra"}]},
+    "viewsContainers": {"activitybar": [{"id": "zentra", "title": "Zentra", "icon": "media/zentra.svg"}]},
+    "views": {"zentra": [{"id": "zentra.agent", "name": "Local Agent", "type": "webview"}]}
+  }
+}

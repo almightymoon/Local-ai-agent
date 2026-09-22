@@ -1,7 +1,10 @@
-import { app, BrowserWindow, Menu, protocol, net } from "electron";
+import { app, BrowserWindow, Menu, protocol, net, ipcMain, dialog } from "electron";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "fs";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const { openIde, executable } = require("../../scripts/ide-runtime.cjs");
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 protocol.registerSchemesAsPrivileged([
@@ -89,6 +92,20 @@ app.whenReady().then(() => {
     );
     return new Response(response.body, { status: response.status, headers });
   });
+  ipcMain.handle("ide:status", (event) => {
+    if (event.senderFrame !== mainWindow?.webContents.mainFrame) throw new Error("Untrusted sender");
+    return { installed: Boolean(executable()) };
+  });
+  ipcMain.handle("ide:open", async (event, chooseFolder) => {
+    if (event.senderFrame !== mainWindow?.webContents.mainFrame || !event.senderFrame.url.startsWith("localagent://app/")) throw new Error("Untrusted sender");
+    let folder;
+    if (chooseFolder === true) {
+      const result = await dialog.showOpenDialog(mainWindow, {properties: ["openDirectory"], title: "Open a project in Zentra IDE"});
+      if (result.canceled) return { opened: false };
+      folder = result.filePaths[0];
+    }
+    return openIde(folder);
+  });
   const navigate = (page) => mainWindow?.webContents.send("navigate", page);
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
@@ -100,6 +117,11 @@ app.whenReady().then(() => {
             label: "New chat",
             accelerator: "CmdOrCtrl+N",
             click: () => navigate("new"),
+          },
+          {
+            label: "Open Agent IDE",
+            accelerator: "CmdOrCtrl+Shift+I",
+            click: () => openIde().catch(error => dialog.showErrorBox("Zentra IDE", error.message)),
           },
           { type: "separator" },
           { role: "close" },

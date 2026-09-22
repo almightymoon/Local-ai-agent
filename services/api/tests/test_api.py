@@ -694,3 +694,54 @@ def test_rejected_build_continues_without_writing(tmp_path, monkeypatch):
     )
     assert "no files were created" in response.text
     assert not (tmp_path / "new-project").exists()
+
+
+def test_ide_workspace_identity(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    data = client.get('/api/ide/workspace').json()
+    assert data['root'] == str(tmp_path)
+    assert data['protocol'] == 1
+    assert TestClient(app).get('/api/ide/workspace').status_code == 401
+
+
+def test_complete_text_tools_only():
+    from app.agent.orchestrator import text_tool_calls
+    valid = '{"name":"read_file","arguments":{"path":"file{a}.txt"}}'
+    schemas = registry.schemas()
+    assert len(text_tool_calls(valid, schemas)) == 1
+    assert len(text_tool_calls('```json\n' + valid + '\n```', schemas)) == 1
+    assert len(text_tool_calls('[' + valid + ',' + valid + ']', schemas)) == 2
+    for text in ['Example: ' + valid, valid + ' Explanation', valid[:-1], '{"name":"unknown","arguments":{}}', '{"name":[],"arguments":{}}', '{"name":"read_file","arguments":{},"example":true}']:
+        assert text_tool_calls(text, schemas) == []
+
+
+def test_fragmented_text_call_executes_once(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    (tmp_path / 'example.txt').write_text('hello')
+    turns = []
+    def model(messages, _tools):
+        turns.append(messages.copy())
+        if len(turns) == 1:
+            raw = '{"name":"read_file","arguments":{"path":"example.txt"}}'
+            for char in raw:
+                yield {'message': {'content': char}}
+        else:
+            yield {'message': {'content': 'The file says hello.'}}
+    monkeypatch.setattr(model_router, 'stream_chat', model)
+    response = chat()
+    assert response['tool_plan'] == ['read_file']
+    assert response['response'] == 'The file says hello.'
+    assert len(turns) == 2
+
+
+def test_native_call_takes_precedence_over_text(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    turns = []
+    def model(messages, _tools):
+        turns.append(messages.copy())
+        if len(turns) == 1:
+            yield {'message': {'content': '{"name":"list_workspace_files","arguments":{}}', 'tool_calls': [call('list_workspace_files')]}}
+        else:
+            yield {'message': {'content': 'Done.'}}
+    monkeypatch.setattr(model_router, 'stream_chat', model)
+    assert chat()['tool_plan'] == ['list_workspace_files']

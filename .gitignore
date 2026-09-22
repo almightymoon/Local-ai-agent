@@ -20,3 +20,7 @@ generated-skills/
 !.env.example
 .test-deps/
 .ruff_cache/
+
+# Local IDE runtime and profile
+.ide/
+*.vsix

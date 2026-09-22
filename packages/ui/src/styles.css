@@ -1962,3 +1962,6 @@ kbd {
   font-size: 11px;
   color: var(--muted);
 }
+
+/* Connected coding workspace */
+.ide-page{max-width:1000px}.ide-hero{padding:35px 0 32px}.ide-badge{display:inline-flex;gap:8px;align-items:center;font-size:10px;letter-spacing:1.8px;opacity:.6}.ide-hero h2{font-size:clamp(32px,4vw,48px);letter-spacing:-1.9px;line-height:1.12;font-weight:550;margin:22px 0 18px}.ide-hero>p{max-width:590px;line-height:1.8;opacity:.72}.ide-launch{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}.ide-launch button{display:flex;align-items:center;gap:8px;padding:12px 18px;border-radius:9px}.ide-features{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:10px 0 30px}.ide-features article{padding:22px;border:1px solid var(--border,#353535);border-radius:12px}.ide-features h3{font-size:14px;margin:18px 0 9px}.ide-features p,.ide-how p{font-size:12px;line-height:1.8;opacity:.65}.ide-how{border-top:1px solid var(--border,#353535);padding-top:14px}.ide-how h3{font-size:15px}.ide-how ol{padding-left:20px;line-height:2.3;font-size:13px}.ide-notice,.ide-browser-note{font-size:13px;line-height:1.8}.ide-page code,.ide-page kbd{font-size:12px}@media(max-width:800px){.ide-features{grid-template-columns:1fr}.ide-hero{padding-top:15px}}

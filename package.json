@@ -14,7 +14,10 @@
     "dev:desktop": "npm --workspace apps/desktop run dev",
     "build:desktop": "npm --workspace apps/desktop run build",
     "start:desktop": "npm --workspace apps/desktop run start",
-    "start:all": "node scripts/start-local.js"
+    "start:all": "node scripts/start-local.js",
+    "setup:ide": "node scripts/setup-ide.cjs",
+    "start:ide": "node scripts/start-ide.cjs",
+    "test:ide": "node --test apps/ide-extension/test/*.test.cjs"
   },
   "devDependencies": {
     "concurrently": "^9.0.1"

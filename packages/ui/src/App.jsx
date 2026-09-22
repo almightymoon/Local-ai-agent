@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, tool, stream, request } from "./api";
 import { Icon } from "./icons";
 import "./styles.css";
+import AgentIDE from "./AgentIDE";
 import useVoiceSession from "./voice/useVoiceSession";
 import VoiceButton from "./voice/VoiceButton";
 import VoiceToast from "./voice/VoiceToast";
@@ -644,6 +645,7 @@ export default function App() {
     skills: "Skills & tools",
     activity: "Activity & approvals",
     quickstart: "Quick Start",
+    ide: "Agent IDE",
     settings: "Settings",
   };
   const filteredChats = chats.filter((c) =>
@@ -900,6 +902,9 @@ export default function App() {
           </div>
         )}
         <div className="sidebar-bottom">
+          <button className={`nav-item ${page === "ide" ? "active" : ""}`} onClick={() => navigate("ide")}>
+            <Icon name="code" size={17} /><span>Agent IDE</span>
+          </button>
           <button
             className={`nav-item ${page === "quickstart" ? "active" : ""}`}
             onClick={() => navigate("quickstart")}
@@ -1283,6 +1288,7 @@ export default function App() {
             <section className="page-content">
               <div className="eyebrow">YOUR LOCAL WORKSPACE</div>
               <h1>{pageNames[page]}</h1>
+              {page === "ide" && <AgentIDE />}
               {page === "quickstart" && (
                 <>
                   <p className="page-intro">
@@ -1302,6 +1308,9 @@ export default function App() {
                       Check again
                     </button>
                   </div>
+                  <button className="secondary" onClick={() => navigate("ide")}>
+                    Open the Agent IDE guide
+                  </button>
                   <div className="steps">
                     {[
                       [
