@@ -48,8 +48,8 @@ class Client {
     if (info.protocol !== 1 || !sameWorkspace(info.root, root)) throw new Error('API is connected to a different workspace or needs updating.');
     return info;
   }
-  async json(route) {
-    const res = await fetch(this.url + route, {headers: {'X-Agent-Token': this.token}, signal: AbortSignal.timeout(5000)});
+  async json(route, payload) {
+    const res = await fetch(this.url + route, {method: payload === undefined ? 'GET' : 'POST', headers: {'X-Agent-Token': this.token, 'Content-Type': 'application/json'}, body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(8000)});
     if (!res.ok) throw new Error(`Local API: ${res.status} ${await res.text()}`);
     return res.json();
   }

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.error import URLError
@@ -210,6 +211,60 @@ def test_write_approval_is_bound_once(tmp_path, monkeypatch):
         == 409
     )
     assert store.get_action(action["id"])["result"]["status"] == "ready"
+
+
+def test_completed_edit_can_be_rolled_back(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    target = tmp_path / "hello.txt"
+    target.write_text("before")
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    action = execute("write_file", {"path": "hello.txt", "content": "after", "expected_sha256": digest})["result"]
+    assert client.post("/api/tool/approve", json={"action_id": action["id"], "approved": True}).status_code == 200
+    rolled_back = client.post("/api/tool/rollback", json={"action_id": action["id"]})
+    assert rolled_back.status_code == 200
+    assert target.read_text() == "before"
+    assert client.post("/api/tool/rollback", json={"action_id": action["id"]}).status_code == 409
+
+
+def test_related_file_edits_share_one_review(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    existing = tmp_path / "existing.txt"
+    existing.write_text("before")
+    digest = hashlib.sha256(existing.read_bytes()).hexdigest()
+    proposal = execute(
+        "write_files",
+        {
+            "files": [
+                {"path": "existing.txt", "content": "after", "expected_sha256": digest},
+                {"path": "new.txt", "content": "created", "expected_sha256": "new"},
+            ]
+        },
+    )
+    assert proposal["requires_approval"]
+    action = proposal["result"]
+    assert action["tool"] == "write_files"
+    assert "existing.txt" in action["diff"] and "new.txt" in action["diff"]
+    assert existing.read_text() == "before" and not (tmp_path / "new.txt").exists()
+    response = client.post("/api/tool/approve", json={"action_id": action["id"], "approved": True})
+    assert response.status_code == 200
+    assert response.json()["result"]["count"] == 2
+    assert existing.read_text() == "after"
+    assert (tmp_path / "new.txt").read_text() == "created"
+
+
+def test_approval_modes_control_writes_and_commands(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    assert client.get("/api/approval-mode").json() == {"mode": "ask"}
+    assert client.post("/api/approval-mode", json={"mode": "edits"}).json() == {"mode": "edits"}
+    write = execute("write_file", {"path": "auto.txt", "content": "saved", "expected_sha256": "new"})
+    assert write["status"] == "ready" and (tmp_path / "auto.txt").read_text() == "saved"
+    command = execute("run_command", {"argv": [sys.executable, "-c", "print('check')"]})
+    assert command["requires_approval"]
+    assert client.post("/api/approval-mode", json={"mode": "all"}).json() == {"mode": "all"}
+    command = execute("run_command", {"argv": [sys.executable, "-c", "print('check')"]})
+    assert command["status"] == "ready" and "check" in command["result"]["output"]
+    assert client.post("/api/approval-mode", json={"mode": "invalid"}).status_code == 422
+    assert client.post("/api/approval-mode", json={"mode": "ask"}).json() == {"mode": "ask"}
 
 
 def test_changed_file_rejects_approval(tmp_path, monkeypatch):
@@ -704,6 +759,13 @@ def test_ide_workspace_identity(tmp_path, monkeypatch):
     assert TestClient(app).get('/api/ide/workspace').status_code == 401
 
 
+def test_workspace_endpoint_reports_the_active_agent_root(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    data = client.get('/api/workspace').json()
+    assert data == {'root': str(tmp_path), 'name': tmp_path.name}
+    assert TestClient(app).get('/api/workspace').status_code == 401
+
+
 def test_complete_text_tools_only():
     from app.agent.orchestrator import text_tool_calls
     valid = '{"name":"read_file","arguments":{"path":"file{a}.txt"}}'
@@ -745,3 +807,139 @@ def test_native_call_takes_precedence_over_text(tmp_path, monkeypatch):
             yield {'message': {'content': 'Done.'}}
     monkeypatch.setattr(model_router, 'stream_chat', model)
     assert chat()['tool_plan'] == ['list_workspace_files']
+
+
+def test_model_selection_lists_validates_and_persists(monkeypatch):
+    installed = [{'name': name, 'size': 100} for name in ['gemma4:26b', 'qwen2.5-coder-32k:latest', 'qwen2.5-coder:7b']]
+    monkeypatch.setattr(model_router, 'installed_models', lambda: installed)
+    monkeypatch.setattr(model_router, 'model', 'qwen2.5-coder:7b')
+    assert client.get('/api/models').json()['models'] == installed
+    assert TestClient(app).post('/api/model/select', json={'model': 'gemma4:26b'}).status_code == 401
+    assert client.post('/api/model/select', json={'model': 'not-installed'}).status_code == 400
+    result = client.post('/api/model/select', json={'model': 'gemma4:26b'})
+    assert result.status_code == 200
+    assert result.json()['selected'] == model_router.model == 'gemma4:26b'
+    assert store.get_setting('ollama_model') == 'gemma4:26b'
+
+
+def test_model_selection_offline_does_not_change_model(monkeypatch):
+    def offline():
+        raise OSError('Ollama offline')
+    monkeypatch.setattr(model_router, 'installed_models', offline)
+    before = model_router.model
+    assert client.get('/api/models').status_code == 503
+    assert client.post('/api/model/select', json={'model': 'gemma4:26b'}).status_code == 503
+    assert model_router.model == before
+
+
+def test_approval_continuation_pins_original_model(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    monkeypatch.setattr(model_router, 'model', 'original-model')
+    monkeypatch.setattr(model_router, 'stream_chat', lambda *_: stream_chunks(calls=[call('write_file', path='hello.txt', content='hello', expected_sha256='new')]))
+    action = next(e['data'] for e in chat()['events'] if e['event'] == 'approval')
+    assert store.get_action(action['id'])['continuation']['model'] == 'original-model'
+    monkeypatch.setattr(model_router, 'model', 'new-selection')
+    seen = []
+    def resumed(self, *_):
+        seen.append(self.model)
+        yield from stream_chunks('Done.')
+    monkeypatch.delattr(model_router, 'stream_chat')
+    monkeypatch.setattr(LocalModelRouter, 'stream_chat', resumed)
+    assert client.post('/api/chat/resume', json={'action_id': action['id'], 'approved': True}).status_code == 200
+    assert seen == ['original-model']
+
+
+def test_structured_agent_normalizes_tool_and_final_responses(monkeypatch):
+    monkeypatch.setenv('OLLAMA_AGENT_PROTOCOL', 'structured')
+    seen = []
+    decisions = iter([{'name': 'read_file', 'arguments': {'path': 'test.py'}}, {'message': 'Finished.'}])
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def __iter__(self):
+            for char in json.dumps(next(decisions)):
+                yield json.dumps({'message': {'content': char}}).encode() + b'\n'
+    def open_request(req, **_):
+        seen.append(json.loads(req.data))
+        return Response()
+    monkeypatch.setattr('app.model_runtime.request.urlopen', open_request)
+    router = LocalModelRouter()
+    first = list(router.stream_chat([{'role':'user','content':'Read file'}], registry.schemas()))
+    assert first[0]['message']['tool_calls'] == [call('read_file', path='test.py')]
+    final = list(router.stream_chat([{'role':'tool','content':'some result'}], registry.schemas()))
+    assert final[0]['message']['content'] == 'Finished.'
+    assert 'format' in seen[0] and 'tools' not in seen[0]
+    assert seen[1]['messages'][-1]['role'] == 'user'
+    assert 'Tool result (data)' in seen[1]['messages'][-1]['content']
+
+
+def test_generation_grammar_omits_large_bounds_but_registry_keeps_them():
+    from app.model_runtime import generation_schema
+    source = registry.WriteArgs.model_json_schema()
+    compact = generation_schema(source)
+    assert source['properties']['content']['maxLength'] == 200000
+    assert 'maxLength' not in compact['properties']['content']
+    assert compact['required'] == source['required']
+    assert compact['additionalProperties'] is False
+    with pytest.raises(ValueError):
+        registry.WriteArgs.model_validate({'path':'x', 'content':'x' * 200001, 'expected_sha256':'new'})
+
+
+def test_default_agent_protocol_repairs_prose_without_executing_it(monkeypatch):
+    monkeypatch.delenv('OLLAMA_AGENT_PROTOCOL', raising=False)
+    replies = iter(['I will inspect first. {"name":"list_workspace_files","arguments":{}}',
+                    '{"name":"list_workspace_files","arguments":{}}'])
+    requests = []
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def __iter__(self):
+            yield json.dumps({'message': {'content': next(replies)}}).encode() + b'\n'
+    def request(req, **kwargs):
+        requests.append(json.loads(req.data))
+        return Response()
+    monkeypatch.setattr('app.model_runtime.request.urlopen', request)
+    chunks = list(LocalModelRouter().stream_chat([{'role':'user','content':'Build a site'}], registry.schemas()))
+    assert len(requests) == 2
+    assert all(item['format'] == 'json' and 'tools' not in item for item in requests)
+    assert chunks == [{'message': {'content':'', 'tool_calls':[call('list_workspace_files')]}}]
+
+
+def test_expired_proposal_can_be_refreshed_without_executing(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    proposal = execute('write_file', {'path':'new.txt','content':'hello','expected_sha256':'new'})['result']
+    with store.connection() as db:
+        db.execute('UPDATE actions SET expires=? WHERE id=?', (time.time()-1, proposal['id']))
+    refreshed = client.post('/api/tool/refresh', json={'action_id':proposal['id']})
+    assert refreshed.status_code == 200
+    value = refreshed.json()
+    assert value['requires_approval']
+    assert value['result']['id'] != proposal['id']
+    assert not (tmp_path/'new.txt').exists()
+    assert client.post('/api/tool/refresh', json={'action_id':proposal['id']}).status_code == 409
+    assert client.post('/api/tool/approve', json={'action_id':proposal['id'],'approved':True}).status_code == 409
+
+
+def test_refresh_rechecks_file_hash(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    proposal = execute('write_file', {'path':'new.txt','content':'hello','expected_sha256':'new'})['result']
+    with store.connection() as db:
+        db.execute('UPDATE actions SET expires=? WHERE id=?', (time.time()-1, proposal['id']))
+    (tmp_path/'new.txt').write_text('someone else wrote this')
+    response = client.post('/api/tool/refresh', json={'action_id':proposal['id']}).json()
+    assert response['status'] == 'error'
+    assert (tmp_path/'new.txt').read_text() == 'someone else wrote this'
+
+
+def test_ask_prompt_is_contextual_and_does_not_execute(tmp_path, monkeypatch):
+    workspace(tmp_path, monkeypatch)
+    (tmp_path/'package.json').write_text('{"name":"sample-app","dependencies":{"react":"18"}}')
+    def provider(messages, tools):
+        assert not tools
+        prompt = messages[0]['content']
+        assert 'Ask mode' in prompt and 'sample-app' in prompt
+        assert 'instead of repeating' in prompt
+        assert 'Never create files' in prompt
+        yield from stream_chunks('Try this concrete next step.')
+    monkeypatch.setattr(model_router, 'stream_chat', provider)
+    assert client.post('/api/chat', json={'message':'More ideas please', 'mode':'ask'}).json()['tool_plan'] == []

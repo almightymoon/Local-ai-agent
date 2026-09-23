@@ -71,6 +71,14 @@ class WriteArgs(Arguments):
     )
 
 
+class BatchWriteArgs(Arguments):
+    files: list[WriteArgs] = Field(
+        min_length=1,
+        max_length=12,
+        description="Related file edits to review and apply together. Every existing file must include its SHA-256 from read_file.",
+    )
+
+
 class CommandArgs(Arguments):
     argv: list[str] = Field(
         min_length=1,
@@ -559,6 +567,32 @@ def write_file(**arguments):
     }
 
 
+def write_files(files):
+    # Check every precondition before touching any file, so one approval cannot
+    # leave a partially applied set because a later file was stale.
+    for item in files:
+        validate_write(**item)
+    written = [write_file(**item) for item in files]
+    return {"files": written, "count": len(written)}
+
+
+def write_preview(files):
+    previews = []
+    for item in files:
+        _, before = validate_write(**item)
+        previews.append(
+            "".join(
+                difflib.unified_diff(
+                    before.splitlines(True),
+                    item["content"].splitlines(True),
+                    fromfile=item["path"],
+                    tofile=item["path"],
+                )
+            )
+        )
+    return "\n".join(previews)
+
+
 def create_directory(path):
     directory = safe_workspace_path(path)
     directory.mkdir(parents=True, exist_ok=True)
@@ -685,6 +719,13 @@ TOOLS = {
             "write",
         ),
         Tool(
+            "write_files",
+            "Propose up to 12 related file edits in one review. Use this for a coherent feature or fix instead of requesting separate approvals for each file.",
+            BatchWriteArgs,
+            write_files,
+            "write",
+        ),
+        Tool(
             "run_command",
             "Run a command with host user permissions, NOT sandboxed. Requires explicit approval. Use to run tests.",
             CommandArgs,
@@ -734,6 +775,11 @@ def result(name, status, message, data=None):
     }
 
 
+def approval_mode():
+    mode = store.get_setting("approval_mode", "ask")
+    return mode if mode in {"ask", "edits", "all"} else "ask"
+
+
 def execute(name, arguments, continuation=None):
     tool = TOOLS.get(name)
     if tool is None:
@@ -749,16 +795,26 @@ def execute(name, arguments, continuation=None):
         if tool.risk != "read":
             preview = None
             if name == "write_file":
-                _, before = validate_write(**args)
-                preview = "".join(
-                    difflib.unified_diff(
-                        before.splitlines(True),
-                        args["content"].splitlines(True),
-                        fromfile=args["path"],
-                        tofile=args["path"],
-                    )
-                )
+                preview = write_preview([args])
+            elif name == "write_files":
+                preview = write_preview(args["files"])
             cwd = safe_workspace_path(args.get("cwd", "."))
+            mode = approval_mode()
+            if mode == "all" or (mode == "edits" and tool.risk == "write"):
+                rollback = None
+                if name in {"write_file", "write_files"}:
+                    files = [args] if name == "write_file" else args["files"]
+                    rollback = []
+                    for item in files:
+                        _, before = validate_write(**item)
+                        rollback.append({"path": item["path"], "content": before, "expected_sha256": hashlib.sha256(item["content"].encode()).hexdigest()})
+                action = store.create_action(name, args, cwd, tool.risk, continuation)
+                store.claim_action(action["id"], True)
+                response = result(name, "ready", "Action executed using your local approval mode.", tool.handler(**args))
+                if rollback is not None:
+                    response["result"]["rollback"] = rollback
+                store.finish_action(action["id"], response)
+                return response
             action = store.create_action(name, args, cwd, tool.risk, continuation)
             action.pop("continuation", None)
             action["diff"] = preview
@@ -790,12 +846,25 @@ def decide(action_id, approved):
             )
             if str(safe_workspace_path(args.get("cwd", "."))) != action["cwd"]:
                 raise ValueError("Workspace changed since this action was prepared.")
+            rollback = None
+            if action["tool"] in {"write_file", "write_files"}:
+                files = [args] if action["tool"] == "write_file" else args["files"]
+                rollback = []
+                for item in files:
+                    target, before = validate_write(**item)
+                    rollback.append({
+                        "path": item["path"],
+                        "content": before,
+                        "expected_sha256": hashlib.sha256(item["content"].encode()).hexdigest(),
+                    })
             response = result(
                 action["tool"],
                 "ready",
                 "Approved action executed.",
                 TOOLS[action["tool"]].handler(**args),
             )
+            if rollback is not None:
+                response["result"]["rollback"] = rollback
         except Exception as exc:
             response = result(action["tool"], "error", str(exc))
     if (
@@ -809,3 +878,16 @@ def decide(action_id, approved):
         )
     store.finish_action(action_id, response)
     return response, action["continuation"]
+
+
+def rollback(action_id):
+    action = store.get_action(action_id)
+    if action["status"] != "completed" or action["tool"] not in {"write_file", "write_files"}:
+        raise ValueError("Only a completed file edit can be rolled back.")
+    files = (action.get("result") or {}).get("result", {}).get("rollback")
+    if not files:
+        raise ValueError("This edit was made before rollback history was available.")
+    for item in files:
+        validate_write(**item)
+    restored = [write_file(**item) for item in files]
+    return {"files": restored, "count": len(restored), "rolled_back_action": action_id}

@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {spawn} = require('node:child_process');
+const {validateFolder, selectedWorkspace, saveWorkspace} = require('./workspace-preferences.cjs');
 const root = path.resolve(__dirname, '..');
 function executable() {
   const candidates = [process.env.ZENTRA_CODIUM, path.join(root, '.ide/runtime/VSCodium.app/Contents/Resources/app/bin/codium'), '/Applications/VSCodium.app/Contents/Resources/app/bin/codium'];
@@ -15,14 +16,14 @@ function run(command, arguments_, options = {}) {
     child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error(`${path.basename(command)} exited with ${code}`)));
   });
 }
-async function openIde(folder = root) {
+async function openIde(folder = selectedWorkspace(root)) {
   const codium = executable();
   if (!codium) throw new Error('VSCodium is not installed. Run npm run setup:ide from the Zentra folder first.');
-  const workspace = fs.realpathSync(folder);
-  if (!fs.statSync(workspace).isDirectory()) throw new Error('Choose a project folder.');
+  const workspace = validateFolder(folder);
   const env = {...process.env, ZENTRA_APP_ROOT: root};
   delete env.ELECTRON_RUN_AS_NODE;
   await run(codium, [...args(), '--new-window', workspace], {env});
+  saveWorkspace(root, workspace);
   return {opened: true, workspace};
 }
 module.exports = {root, executable, args, run, openIde};

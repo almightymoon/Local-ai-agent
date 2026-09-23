@@ -33,7 +33,7 @@ async function setup() {
   if (!fs.existsSync(settings)) fs.writeFileSync(settings, JSON.stringify({
     'workbench.colorTheme': 'Default Dark Modern', 'workbench.startupEditor': 'none',
     'editor.fontSize': 14, 'editor.minimap.enabled': false, 'editor.padding.top': 16,
-    'workbench.sideBar.location': 'right', 'telemetry.telemetryLevel': 'off',
+    'workbench.sideBar.location': 'left', 'telemetry.telemetryLevel': 'off',
     'workbench.activityBar.location': 'default', 'window.title': '${rootName} — Zentra IDE',
   }, null, 2));
   console.log('Zentra IDE is ready. Run npm run start:ide, or choose Open Agent IDE in the app.');

@@ -1,0 +1,13 @@
+/* Focused local-agent workspace polish. */
+.permission-bar{display:flex;align-items:center;gap:9px;padding:0 8px 10px;font-size:11px;color:var(--muted);flex-wrap:wrap}
+.permission-bar label,.permission-bar button{display:inline-flex;align-items:center;gap:6px}
+.permission-bar select{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:5px 8px;font:inherit;max-width:100%}
+.permission-bar button{margin-left:auto;padding:5px;color:var(--muted)}
+.permission-bar button:hover{color:var(--text)}
+.snippet{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:14px 0;background:var(--side)}
+.snippet-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px;border-bottom:1px solid var(--line);color:var(--muted);font-size:11px}
+.snippet-toolbar button{display:flex;align-items:center;gap:6px;color:inherit;padding:3px 6px;border-radius:4px}
+.snippet-toolbar button:hover{background:var(--hover);color:var(--text)}
+.markdown .snippet pre{border:0;border-radius:0;margin:0;padding:16px;background:transparent}
+@media(prefers-reduced-motion:reduce){.task-working i{animation:none!important}}
+.task-context{display:flex;align-items:center;gap:8px;max-width:820px;margin:0 auto 8px;padding:0 8px;color:var(--muted);font-size:11px}.task-context span:not(.task-mode){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-mode{padding:3px 7px;border-radius:999px;font-weight:650;color:var(--accent-ink);background:var(--accent)}.task-mode.ask{background:var(--panel);border:1px solid var(--line);color:var(--muted)}.task-mode.plan{background:#695bff;color:white}.task-working{margin-left:auto;color:var(--accent)}.task-working i{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;animation:zentra-pulse 1.2s infinite}.task-ready{margin-left:auto;color:var(--muted)}@keyframes zentra-pulse{50%{opacity:.25;transform:scale(.7)}}.message.user{background:linear-gradient(135deg,var(--panel),transparent);border-radius:14px;padding:15px 17px}.message.assistant{padding:8px 17px}.message-actions{opacity:.55}.message:hover .message-actions{opacity:1}.composer-area{background:linear-gradient(0deg,var(--bg) 70%,transparent)}.composer{box-shadow:0 16px 45px rgba(0,0,0,.16)}

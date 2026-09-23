@@ -2,7 +2,11 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, tool, stream, request } from "./api";
 import { Icon } from "./icons";
 import "./styles.css";
+import "./polish.css";
 import AgentIDE from "./AgentIDE";
+import ModelPicker from "./ModelPicker";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import useVoiceSession from "./voice/useVoiceSession";
 import VoiceButton from "./voice/VoiceButton";
 import VoiceToast from "./voice/VoiceToast";
@@ -45,6 +49,13 @@ const newChat = () => ({
   messages: [],
   updated: Date.now(),
 });
+function ZentraMark({ size = 24 }) {
+  return (
+    <svg className="zentra-mark" width={size} height={size} viewBox="0 0 52 40" aria-hidden="true">
+      <path d="M7 5h38L7 35h38M3 20h46" />
+    </svg>
+  );
+}
 function groupChatsByDate(chats) {
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
@@ -93,47 +104,25 @@ function loadChats() {
   }
   return [newChat()];
 }
-function RichText({ text = "" }) {
-  return text.split(/(```[\s\S]*?(?:```|$))/g).map((part, i) => {
-    if (part.startsWith("```")) {
-      const raw = part.slice(3).replace(/```$/, "");
-      const nl = raw.indexOf("\n");
-      return (
-        <div className="code-block" key={i}>
-          <div>{nl >= 0 ? raw.slice(0, nl) || "Code" : "Code"}</div>
-          <pre>
-            <code>{nl >= 0 ? raw.slice(nl + 1) : raw}</code>
-          </pre>
-        </div>
-      );
-    }
-    return (
-      <div className="prose" key={i}>
-        {part.split("\n").map((line, j) => {
-          const content = line
-            .replace(/^#{1,4} /, "")
-            .split(/(`[^`]+`|\*\*[^*]+\*\*)/g)
-            .map((chunk, k) =>
-              chunk.startsWith("`") ? (
-                <code key={k}>{chunk.slice(1, -1)}</code>
-              ) : chunk.startsWith("**") ? (
-                <strong key={k}>{chunk.slice(2, -2)}</strong>
-              ) : (
-                chunk
-              ),
-            );
-          return /^#{1,4} /.test(line) ? (
-            <h3 key={j}>{content}</h3>
-          ) : (
-            <div key={j}>{content || "\u00a0"}</div>
-          );
-        })}
-      </div>
-    );
-  });
+function CodeSnippet({ children }) {
+  const content = useRef(null);
+  const [feedback, setFeedback] = useState("");
+  return <section className="snippet">
+    <div className="snippet-toolbar"><span>Code</span><button type="button" onClick={async () => {
+      try { await navigator.clipboard.writeText(content.current.textContent); setFeedback("Copied"); }
+      catch { setFeedback("Copy unavailable — select the code"); }
+    }}><Icon name="copy" size={13} />{feedback || "Copy code"}</button></div>
+    <pre ref={content}>{children}</pre>
+  </section>;
 }
-function ActionCard({ action, onDecide, busy }) {
-  const expired = action.expires * 1000 < Date.now();
+const markdownComponents = { pre: CodeSnippet };
+function RichText({ text }) {
+  return <div className="prose markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{text || ""}</ReactMarkdown></div>;
+}
+function ActionCard({ action, onDecide, onRefresh, busy }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer);}, []);
+  const expired = action.expires * 1000 < now;
   return (
     <section className="approval-card">
       <div className="section-label">
@@ -168,7 +157,7 @@ function ActionCard({ action, onDecide, busy }) {
         >
           Reject
         </button>
-        {expired && <span>Expired — request a new action.</span>}
+        {expired && <button className="secondary" disabled={busy} onClick={onRefresh}>Refresh proposal</button>}
       </div>
     </section>
   );
@@ -177,6 +166,7 @@ export default function App() {
   const [chats, setChats] = useState(loadChats);
   const [activeId, setActiveId] = useState(null);
   const [page, setPage] = useState("chat");
+  const [runtime, setRuntime] = useState(null);
   const [sidebar, setSidebar] = useState(() => window.innerWidth > 800);
   const [theme, setTheme] = useState(
     () => localStorage.getItem("zentra_theme") || "dark",
@@ -194,6 +184,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [notice, setNotice] = useState("");
   const [status, setStatus] = useState(null);
+  const [approvalMode, setApprovalMode] = useState("ask");
+  const [approvalSaving, setApprovalSaving] = useState(false);
   const [files, setFiles] = useState([]);
   const [directory, setDirectory] = useState(".");
   const [preview, setPreview] = useState(null);
@@ -305,6 +297,56 @@ export default function App() {
     });
     return unsub;
   }, [busy]);
+  useEffect(() => {
+    const update = (value) => {
+      setRuntime(value);
+      if (value.phase === "ready") {
+        refreshStatus();
+        window.dispatchEvent(new Event("zentra:runtime-ready"));
+      }
+    };
+    window.desktop?.runtimeStatus?.().then(update).catch(() => {});
+    return window.desktop?.onRuntimeStatus?.(update);
+  }, []);
+  async function openIDE() {
+    if (!window.desktop?.openIde) {navigate("ide"); return;}
+    try {await window.desktop.openIde();} catch (error) {setNotice(error.message);}
+  }
+  async function chooseWorkspace() {
+    if (!window.desktop?.chooseWorkspace) {
+      setNotice("Choose a workspace from the installed Zentra desktop app.");
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await window.desktop.chooseWorkspace();
+      if (next?.cancelled) return;
+      setRuntime(next);
+      setDirectory(".");
+      setFiles([]);
+      setPreview(null);
+      setMatches(null);
+      setSearch("");
+      startChat();
+      await refreshStatus();
+      setNotice(`Workspace changed to ${next.workspace}. Start a new task and the agent will read this folder.`);
+    } catch (error) {
+      setNotice(error.message || "Could not change the workspace.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function refreshProposal(message) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const response = await api("/api/tool/refresh", {action_id: message.action.id});
+      if (!response.requires_approval) throw new Error(response.message + " Ask the agent to read the changed file and prepare a fresh edit.");
+      updateMessage(active.id, message.id, value => ({...value, action: response.result}));
+    } catch (error) {setNotice(error.message);}
+    finally {setBusy(false);}
+  }
   const refreshStatus = async () => {
     try {
       setStatus(await api("/api/model/status"));
@@ -316,8 +358,31 @@ export default function App() {
       });
     }
   };
+  const refreshApprovalMode = async () => {
+    try {
+      const response = await api("/api/approval-mode");
+      setApprovalMode(response.mode);
+    } catch {}
+  };
+  const changeApprovalMode = async (mode) => {
+    setApprovalSaving(true);
+    try {
+      const response = await api("/api/approval-mode", { mode });
+      setApprovalMode(response.mode);
+      setNotice(
+        response.mode === "ask"
+          ? "Zentra will ask before every edit and command."
+          : response.mode === "edits"
+            ? "Zentra will apply file edits automatically and still ask before commands."
+            : "Autopilot is on. Zentra will apply edits and run project commands automatically.",
+      );
+    } catch (error) {
+      setNotice(error.message);
+    } finally { setApprovalSaving(false); }
+  };
   useEffect(() => {
     refreshStatus();
+    refreshApprovalMode();
     const timer = setInterval(refreshStatus, 30000);
     return () => {
       clearInterval(timer);
@@ -498,6 +563,11 @@ export default function App() {
     if (!text || busy || controller.current || pending) return;
     await sendText(text, mode).catch(() => {});
   }
+  function editMessage(message) {
+    if (busy || message.role !== "user") return;
+    setDraft(message.text);
+    input.current?.focus();
+  }
   async function decide(message, approved) {
     if (busy || controller.current) return;
     updateMessage(active.id, message.id, (m) => ({ ...m, decided: true }));
@@ -552,6 +622,16 @@ export default function App() {
     setChats((prev) => [chat, ...prev]);
     setActiveId(chat.id);
     navigate("chat");
+  }
+  async function rollbackAction(action) {
+    if (busy) return;
+    try {
+      const result = await api("/api/tool/rollback", { action_id: action.id });
+      setNotice(`Rolled back ${result.count} file${result.count === 1 ? "" : "s"}.`);
+      setActions(await api("/api/actions").then((data) => data.actions));
+    } catch (error) {
+      setNotice(error.message);
+    }
   }
   async function openFile(item) {
     const path = directory === "." ? item : `${directory}/${item}`;
@@ -712,7 +792,7 @@ export default function App() {
         <div className="brand-row">
           <button className="brand" onClick={() => navigate("chat")}>
             <span className="brand-mark">
-              <Icon name="spark" size={20} />
+              <ZentraMark size={25} />
             </span>
             <span className="brand-text">
               Zentra
@@ -960,12 +1040,11 @@ export default function App() {
                 : pageNames[page]}
             </span>
             {page === "chat" && (
-              <span className="model-label">
-                {status?.model || "Connecting…"}
-              </span>
+              <ModelPicker value={status?.model} disabled={busy} onSelected={refreshStatus} compact />
             )}
           </div>
           <div className="topbar-actions">
+            <button className="ghost-chip" onClick={openIDE} title="Open the IDE with Zentra’s coding agent"><Icon name="code" size={15} /> Open IDE</button>
             {page === "chat" && (
               <button
                 className="ghost-chip"
@@ -1089,6 +1168,7 @@ export default function App() {
                           action={m.action}
                           busy={busy}
                           onDecide={(approved) => decide(m, approved)}
+                          onRefresh={() => refreshProposal(m)}
                         />
                       )}
                       {m.decided && (
@@ -1124,6 +1204,13 @@ export default function App() {
                           </button>
                         </div>
                       )}
+                      {m.role === "user" && (
+                        <div className="message-actions">
+                          <button className="icon-button" aria-label="Edit message" onClick={() => editMessage(m)}>
+                            <Icon name="edit" size={16} />
+                          </button>
+                        </div>
+                      )}
                     </article>
                   ))}
                   <div ref={end} />
@@ -1131,6 +1218,21 @@ export default function App() {
               )}
             </div>
             <div className="composer-area">
+              <div className="task-context" role="status">
+                <span className={`task-mode ${mode}`}>{mode === "agent" ? "Agent" : mode === "plan" ? "Plan" : "Ask"}</span>
+                <span>{runtime?.workspace ? runtime.workspace.split("/").filter(Boolean).pop() : "Local workspace"}</span>
+                {busy && <span className="task-working"><i /> Working</span>}
+                {!busy && <span className="task-ready">{pending ? "Waiting for approval" : runtime?.phase === "error" ? "Connection needs attention" : runtime?.phase === "starting" ? "Starting services…" : !status ? "Connecting…" : !status.available ? "Model unavailable" : mode === "agent" ? "Ready to build" : "Ready"}</span>}
+              </div>
+              <div className="permission-bar">
+                <label htmlFor="composer-permissions"><Icon name="shield" size={14} /> Permissions</label>
+                <select id="composer-permissions" value={approvalMode} disabled={busy || approvalSaving} onChange={event => changeApprovalMode(event.target.value)}>
+                  <option value="ask">Ask before changes</option>
+                  <option value="edits">Auto-approve edits</option>
+                  <option value="all">Autopilot — edits and commands</option>
+                </select>
+                <button type="button" onClick={() => navigate("activity")}>Change history <Icon name="arrow" size={12} /></button>
+              </div>
               <form className="composer" onSubmit={send}>
                 <textarea
                   ref={input}
@@ -1275,9 +1377,11 @@ export default function App() {
                   </div>
                 </div>
               </form>
+              <div className="mode-description">{mode === "ask" ? "Ask · Clear answers and explanations. No files are changed." : mode === "plan" ? "Plan · Work out the approach before implementing it." : "Agent · Inspect files, implement changes, and verify. Approve proposed actions to continue."}</div>
+              {runtime && runtime.phase !== "ready" && <div className="runtime-notice" role="status">{runtime.message}{runtime.phase === "error" && <button className="secondary" onClick={() => window.desktop.retryServices()}>Retry services</button>}</div>}
               <p className="composer-note">
                 <Icon name="shield" size={12} />
-                Local by default. Changes only with your approval.
+                {approvalMode === "all" ? "Autopilot: file edits and commands run automatically with your user permissions." : approvalMode === "edits" ? "File edits run automatically. Commands ask first." : "Local by default. Changes only with your approval."}
                 <span>Enter to send · Shift + Enter for a new line</span>
               </p>
               {/* Voice panel removed — microphone remains as a toggle button only */}
@@ -1292,7 +1396,7 @@ export default function App() {
               {page === "quickstart" && (
                 <>
                   <p className="page-intro">
-                    From first launch to your first useful conversation.
+                    For everyday use, open Zentra.app. Ollama and the workspace agent start automatically. The commands below are one-time setup.
                   </p>
                   <div className="setup-status">
                     <Icon name={status?.available ? "check" : "terminal"} />
@@ -1315,21 +1419,21 @@ export default function App() {
                     {[
                       [
                         "01",
-                        "Install the project dependencies",
+                        "Install dependencies once",
                         "Run these commands from the Zentra project folder.",
                         "npm install\npython3 -m venv .venv\n.venv/bin/pip install -r services/api/requirements.txt",
                       ],
                       [
                         "02",
-                        "Start your local model",
-                        "Install Ollama first, then start it and download the configured model.",
-                        "ollama serve\n# In another terminal:\nollama pull qwen2.5-coder:7b",
+                        "Install a local model once",
+                        "Install and open Ollama, then download a model. Choose any installed model from the model picker.",
+                        "ollama pull qwen2.5-coder:7b",
                       ],
                       [
                         "03",
-                        "Open your workspace",
-                        "This builds the desktop app, starts the API, and launches Electron.",
-                        "npm run start:all",
+                        "Install the desktop app and IDE",
+                        "After setup, double-click Zentra in your Applications folder. Use Open IDE to start coding.",
+                        "npm run install:desktop\nnpm run setup:ide",
                       ],
                     ].map(([number, title, description, command]) => (
                       <div className="step" key={number}>
@@ -1377,6 +1481,18 @@ export default function App() {
                   <p className="page-intro">
                     Explore the files your agent can work with.
                   </p>
+                  <section className="workspace-selector" aria-label="Active workspace">
+                    <div>
+                      <span>ACTIVE WORKSPACE</span>
+                      <strong title={runtime?.workspace || ""}>
+                        {runtime?.workspace || "Connecting to local workspace…"}
+                      </strong>
+                    </div>
+                    <button className="secondary" onClick={chooseWorkspace} disabled={busy}>
+                      <Icon name="folder" size={16} />
+                      Change workspace
+                    </button>
+                  </section>
                   <form
                     className="search-form"
                     onSubmit={async (e) => {
@@ -1606,6 +1722,11 @@ export default function App() {
                             Review action
                           </button>
                         )}
+                      {action.status === "completed" && action.result?.result?.rollback && (
+                        <button className="secondary" disabled={busy} onClick={() => rollbackAction(action)}>
+                          Roll back change
+                        </button>
+                      )}
                     </details>
                   ))}
                 </>
@@ -1798,6 +1919,7 @@ export default function App() {
                           Refresh
                         </button>
                       </div>
+                      <ModelPicker value={status?.model} disabled={busy} onSelected={refreshStatus} />
                       {!status?.available && (
                         <button
                           className="primary settings-cta"
@@ -1807,6 +1929,35 @@ export default function App() {
                           <Icon name="arrow" size={15} />
                         </button>
                       )}
+                    </section>
+                    <section className="settings-card">
+                      <div className="settings-card-head">
+                        <Icon name="shield" />
+                        <div>
+                          <h3>Agent approvals</h3>
+                          <p>Choose how often Zentra pauses before making changes.</p>
+                        </div>
+                      </div>
+                      <label className="settings-field">
+                        <span>Approval mode</span>
+                        <select
+                          value={approvalMode}
+                          disabled={busy || approvalSaving}
+                          onChange={(event) => changeApprovalMode(event.target.value)}
+                          aria-label="Agent approval mode"
+                        >
+                          <option value="ask">Ask every time</option>
+                          <option value="edits">Auto-approve file edits</option>
+                          <option value="all">Autopilot — edits and commands</option>
+                        </select>
+                      </label>
+                      <p className="settings-help">
+                        {approvalMode === "ask"
+                          ? "Every file change and command is reviewed first."
+                          : approvalMode === "edits"
+                            ? "File edits run immediately; commands still need your approval."
+                            : "File edits and project commands run immediately in the selected workspace."}
+                      </p>
                     </section>
                     <section className="settings-card">
                       <div className="settings-card-head">

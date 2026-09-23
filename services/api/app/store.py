@@ -28,6 +28,7 @@ def connection():
         id TEXT PRIMARY KEY, tool TEXT NOT NULL, arguments TEXT NOT NULL, cwd TEXT NOT NULL,
         risk TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL,
         status TEXT NOT NULL, decision INTEGER, result TEXT, continuation TEXT)""")
+    db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     legacy = Path(__file__).resolve().parent / "local_agent.db"
     if first_run and not os.getenv("DB_PATH") and legacy.is_file():
         with sqlite3.connect(f"file:{legacy}?mode=ro", uri=True) as old:
@@ -128,3 +129,14 @@ def finish_action(action_id, result):
                 action_id,
             ),
         )
+
+
+def get_setting(key, default=None):
+    with connection() as db:
+        row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def save_setting(key, value):
+    with connection() as db:
+        db.execute("INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))

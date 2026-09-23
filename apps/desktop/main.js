@@ -6,6 +6,16 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const { openIde, executable } = require("../../scripts/ide-runtime.cjs");
 
+const { createServices } = require("../../scripts/local-services.cjs");
+app.setName("Zentra");
+// Preserve chats from the original Electron app profile.
+app.setPath("userData", path.join(app.getPath("appData"), "desktop"));
+const services = createServices(status => mainWindow?.webContents.send("runtime:status", status));
+const singleInstance = app.requestSingleInstanceLock();
+if (!singleInstance) app.quit();
+app.on("second-instance", () => { mainWindow?.show(); mainWindow?.focus(); });
+app.on("before-quit", () => services.stop());
+
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 protocol.registerSchemesAsPrivileged([
   {
@@ -75,6 +85,7 @@ function createWindow() {
   mainWindow.loadURL("localagent://app/index.html");
 }
 app.whenReady().then(() => {
+  if (!singleInstance) return;
   try {
     fs.appendFileSync("/tmp/electron-main.log", `app.whenReady\n`);
   } catch {}
@@ -92,19 +103,31 @@ app.whenReady().then(() => {
     );
     return new Response(response.body, { status: response.status, headers });
   });
+  const trustedSender = (event) => event.senderFrame === mainWindow?.webContents.mainFrame && event.senderFrame.url.startsWith("localagent://app/");
+  ipcMain.handle("runtime:status", event => {if (!trustedSender(event)) throw new Error("Untrusted sender"); return services.status();});
+  ipcMain.handle("runtime:retry", event => {if (!trustedSender(event)) throw new Error("Untrusted sender"); return services.start();});
+  ipcMain.handle("workspace:choose", async event => {
+    if (!trustedSender(event)) throw new Error("Untrusted sender");
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ["openDirectory", "createDirectory"],
+      title: "Choose a workspace for Zentra",
+      buttonLabel: "Use this workspace",
+    });
+    if (result.canceled || !result.filePaths.length) return {cancelled: true};
+    return services.changeWorkspace(result.filePaths[0]);
+  });
   ipcMain.handle("ide:status", (event) => {
     if (event.senderFrame !== mainWindow?.webContents.mainFrame) throw new Error("Untrusted sender");
     return { installed: Boolean(executable()) };
   });
+  async function chooseProject() {
+    const result = await dialog.showOpenDialog(mainWindow, {properties: ["openDirectory", "createDirectory"], title: "Choose a project for Zentra IDE", buttonLabel: "Open project"});
+    if (result.canceled || !result.filePaths.length) return {opened: false};
+    return openIde(result.filePaths[0]);
+  }
   ipcMain.handle("ide:open", async (event, chooseFolder) => {
     if (event.senderFrame !== mainWindow?.webContents.mainFrame || !event.senderFrame.url.startsWith("localagent://app/")) throw new Error("Untrusted sender");
-    let folder;
-    if (chooseFolder === true) {
-      const result = await dialog.showOpenDialog(mainWindow, {properties: ["openDirectory"], title: "Open a project in Zentra IDE"});
-      if (result.canceled) return { opened: false };
-      folder = result.filePaths[0];
-    }
-    return openIde(folder);
+    return chooseFolder === true ? chooseProject() : openIde();
   });
   const navigate = (page) => mainWindow?.webContents.send("navigate", page);
   Menu.setApplicationMenu(
@@ -122,6 +145,11 @@ app.whenReady().then(() => {
             label: "Open Agent IDE",
             accelerator: "CmdOrCtrl+Shift+I",
             click: () => openIde().catch(error => dialog.showErrorBox("Zentra IDE", error.message)),
+          },
+          {
+            label: "Change IDE Workspace…",
+            accelerator: "CmdOrCtrl+Alt+O",
+            click: () => chooseProject().catch(error => dialog.showErrorBox("Zentra IDE", error.message)),
           },
           { type: "separator" },
           { role: "close" },
@@ -143,6 +171,7 @@ app.whenReady().then(() => {
     ]),
   );
   createWindow();
+  void services.start();
   try {
     fs.appendFileSync("/tmp/electron-main.log", `createWindow finished\n`);
   } catch {}

@@ -1,18 +1,95 @@
 {
-  "name": "zentra-agent", "displayName": "Zentra — Local Coding Agent", "publisher": "zentra-local",
-  "version": "0.1.0", "description": "Build with your local model: workspace tools, reviewed edits, and verification in VSCodium.",
-  "license": "MIT", "engines": {"vscode": "^1.90.0"}, "main": "./extension.cjs",
-  "activationEvents": ["onStartupFinished"],
-  "capabilities": {"untrustedWorkspaces": {"supported": false, "description": "The agent reads workspace files and can execute approved commands."}},
+  "name": "zentra-agent",
+  "displayName": "Zentra \u2014 Local Coding Agent",
+  "publisher": "zentra-local",
+  "version": "0.2.0",
+  "description": "Build with your local model: workspace tools, reviewed edits, and verification in VSCodium.",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.cjs",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The agent reads workspace files and can execute approved commands."
+    }
+  },
   "contributes": {
     "commands": [
-      {"command": "zentra.openAgent", "title": "Zentra: Open Local Agent"},
-      {"command": "zentra.sendSelection", "title": "Zentra: Add Selection to Agent"},
-      {"command": "zentra.showOutput", "title": "Zentra: Show Agent Output"}
+      {
+        "command": "zentra.openAgent",
+        "title": "Zentra: Open Local Agent"
+      },
+      {
+        "command": "zentra.sendSelection",
+        "title": "Zentra: Add Selection to Agent"
+      },
+      { "command": "zentra.explainSelection", "title": "Zentra: Explain Selection" },
+      { "command": "zentra.fixSelection", "title": "Zentra: Fix Selection" },
+      { "command": "zentra.refactorSelection", "title": "Zentra: Refactor Selection" },
+      { "command": "zentra.createBranch", "title": "Zentra: Create Task Branch" },
+      { "command": "zentra.draftCommit", "title": "Zentra: Draft Commit Message" },
+      {
+        "command": "zentra.showOutput",
+        "title": "Zentra: Show Agent Output"
+      },
+      {
+        "command": "zentra.changeWorkspace",
+        "title": "Zentra: Change Workspace",
+        "icon": "$(folder-opened)"
+      }
     ],
-    "keybindings": [{"command": "zentra.openAgent", "key": "ctrl+shift+l", "mac": "cmd+shift+l"}],
-    "menus": {"editor/context": [{"command": "zentra.sendSelection", "when": "editorHasSelection", "group": "zentra"}]},
-    "viewsContainers": {"activitybar": [{"id": "zentra", "title": "Zentra", "icon": "media/zentra.svg"}]},
-    "views": {"zentra": [{"id": "zentra.agent", "name": "Local Agent", "type": "webview"}]}
+    "keybindings": [
+      {
+        "command": "zentra.openAgent",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "zentra.sendSelection",
+          "when": "editorHasSelection",
+          "group": "zentra"
+        },
+        { "command": "zentra.explainSelection", "when": "editorHasSelection", "group": "zentra@1" },
+        { "command": "zentra.fixSelection", "when": "editorHasSelection", "group": "zentra@2" },
+        { "command": "zentra.refactorSelection", "when": "editorHasSelection", "group": "zentra@3" }
+      ],
+      "commandPalette": [
+        { "command": "zentra.createBranch" },
+        { "command": "zentra.draftCommit" }
+      ],
+      "view/title": [
+        {
+          "command": "zentra.changeWorkspace",
+          "when": "view == zentra.agent",
+          "group": "navigation"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "zentra",
+          "title": "Zentra",
+          "icon": "media/zentra.svg"
+        }
+      ]
+    },
+    "views": {
+      "zentra": [
+        {
+          "id": "zentra.agent",
+          "name": "Local Agent",
+          "type": "webview"
+        }
+      ]
+    }
   }
 }
